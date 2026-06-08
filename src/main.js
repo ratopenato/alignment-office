@@ -9,6 +9,7 @@ import {
   getCommands,
   applyOccupantOverride,
   endOverride,
+  resetScenario,
 } from './dataSource.js';
 
 /* -----------------------------------------------------------------
@@ -50,21 +51,46 @@ let ceilingLight;
 
 // Occupant
 let occupant;
-// Annoyance / Misalignment level (0..1) — rises on each override, slowly decays.
-let annoyance = 0;
-const ANNOYANCE_PER_OVERRIDE = 0.18;
-const ANNOYANCE_DECAY_PER_FRAME = 0.00015;
 
 // Additional environmental references
 let sunLight;
 let skyMesh;
 
 // HUD and control element references.  These will be assigned in init()
-let narrativeEl, modeBadgeEl;
+let modeBadgeEl;
 let valShadeEl, valThermEl, valLightsEl, valAcEl;
 let valPmvEl, valTempEl, valCo2El, valLuxEl, valHumEl, valTimeEl;
-let valAnnoyanceEl, annoyanceBarEl;
-let shadeBtnEl, thermBtnEl, lightBtnEl;
+// Center-column gauges + scenario readout.
+let occStateEl, occIssueEl, alignScoreEl, alignMarkerEl, riskValEl, riskFillEl;
+let scnNowEl, scnTotalEl, scnOverridesEl;
+// Scenario / diagnosis card.
+let diagIssueEl, diagPriorityEl, diagRiskEl, diagConflictEl;
+// Action panel + feedback panel + end summary.
+let actionsEl;
+let fbPanelEl, fbVerdictEl, fbReasonEl, fbDeltaEl, fbRiskEl;
+let summaryEl, sumScoreEl, sumStyleEl, sumDetailEl, sumRestartEl;
+
+// Scene cues created in init() after the occupant is built.
+let glareSprite, statusBubble;
+
+// -------------------------------------------------------------------
+// Game state — alignment scoring, scenario progression, event logging.
+// All in-memory; no persistence or backend.
+// -------------------------------------------------------------------
+const TOTAL_SCENARIOS = 10;
+const game = {
+  scenario: 1,
+  alignment: 100,        // 0..100 running score
+  aligned: 0,            // count of accepted decisions
+  misaligned: 0,         // count of overridden decisions
+  overrides: 0,          // total occupant overrides
+  domainConflicts: { Shading: 0, HVAC: 0, Lighting: 0 }, // where overrides happened
+  actionsThisScenario: 0,
+  solvedAt: 0,           // timestamp when current scenario became satisfied
+  finished: false,
+  lastDecision: null,    // result of the most recent player action this session
+  log: [],               // structured per-action events
+};
 
 // Simulation state and animation queue
 let state = 'idle';
@@ -108,10 +134,9 @@ const POS = {
 // DOM references
 const statusEl = document.getElementById('status');
 
-
-// Initialise the scene
-init();
-animate();
+// Note: the scene is bootstrapped at the very bottom of this module
+// (after all const declarations such as ACTIONS are initialised) so that
+// init() can safely reference them without hitting a temporal-dead-zone.
 
 function init() {
   // Create scene and camera
@@ -210,6 +235,7 @@ function init() {
   buildPlant();
   buildBookshelf();
   buildOccupant();
+  buildSceneCues();
   // Ensure the AC LED and louvres are initialised to the off state
   updateACVisual(false);
 
@@ -219,7 +245,6 @@ function init() {
   renderer.domElement.addEventListener('pointerdown', onPointerDown);
 
   // Assign HUD and control elements after DOM is loaded
-  narrativeEl = document.getElementById('narrative');
   modeBadgeEl = document.getElementById('mode-badge');
   valShadeEl  = document.getElementById('val-shade');
   valThermEl  = document.getElementById('val-therm');
@@ -230,33 +255,137 @@ function init() {
   valCo2El    = document.getElementById('val-co2');
   valLuxEl    = document.getElementById('val-lux');
   valHumEl    = document.getElementById('val-hum');
-  valAnnoyanceEl = document.getElementById('val-annoyance');
-  annoyanceBarEl = document.getElementById('annoyance-bar');
   valTimeEl   = document.getElementById('val-time');
-  shadeBtnEl  = document.getElementById('shadeBtn');
-  thermBtnEl  = document.getElementById('thermBtn');
-  lightBtnEl  = document.getElementById('lightBtn');
-  // Hook up button handlers.  Each issues a command to the simulation;
-  // the occupant FSM decides when to override.
-  if (shadeBtnEl) shadeBtnEl.addEventListener('click', commandShadeToggle);
-  if (thermBtnEl) thermBtnEl.addEventListener('click', commandThermCycle);
-  if (lightBtnEl) lightBtnEl.addEventListener('click', commandLightsToggle);
+
+  occStateEl    = document.getElementById('occ-state');
+  occIssueEl    = document.getElementById('occ-issue');
+  alignScoreEl  = document.getElementById('align-score');
+  alignMarkerEl = document.getElementById('alignment-marker');
+  riskValEl     = document.getElementById('risk-val');
+  riskFillEl    = document.getElementById('risk-fill');
+  scnNowEl      = document.getElementById('scn-now');
+  scnTotalEl    = document.getElementById('scn-total');
+  scnOverridesEl = document.getElementById('scn-overrides');
+
+  diagIssueEl    = document.getElementById('diag-issue');
+  diagPriorityEl = document.getElementById('diag-priority');
+  diagRiskEl     = document.getElementById('diag-risk');
+  diagConflictEl = document.getElementById('diag-conflict');
+
+  actionsEl  = document.getElementById('actions');
+  fbPanelEl   = document.getElementById('feedback-panel');
+  fbVerdictEl = document.getElementById('fb-verdict');
+  fbReasonEl  = document.getElementById('fb-reason');
+  fbDeltaEl   = document.getElementById('fb-delta');
+  fbRiskEl    = document.getElementById('fb-risk');
+
+  summaryEl    = document.getElementById('summary-overlay');
+  sumScoreEl   = document.getElementById('sum-score');
+  sumStyleEl   = document.getElementById('sum-style');
+  sumDetailEl  = document.getElementById('sum-detail');
+  sumRestartEl = document.getElementById('sum-restart');
+  if (sumRestartEl) sumRestartEl.addEventListener('click', restartSession);
+
+  if (scnTotalEl) scnTotalEl.textContent = String(TOTAL_SCENARIOS);
 
   setStatus('waiting for interaction');
-  setButtons(true);
   // Initialise HUD with current simulation state and daylight
   const initialState = getState();
+  renderActions(initialState);
   updateHUD(initialState);
   updateDaylight(initialState);
   // Debug hook — fire an override animation manually for testing.
   window.__sim = {
     forceOverride: (target) => { if (state === 'idle') startOverrideAnim(target); },
     snapshot: () => getState(),
+    log: () => game.log,
+    game: () => game,
     airflow: () => acAirflowGroup?.children?.map(c => ({
       color: '#' + c.material.color.getHexString(),
       opacity: c.material.opacity.toFixed(3),
     })),
+    // Live head-cue state: opacity is what's actually rendered above the
+    // occupant; cue is null when the occupant is comfortable.
+    headCue: () => {
+      const ui = deriveUiState(getState());
+      return {
+        opacity: statusBubble ? +statusBubble.sprite.material.opacity.toFixed(3) : null,
+        cueType: ui.cueType,
+        cue: ui.cueType ? CUE_VISUAL[ui.cueType] : null,
+      };
+    },
+    ui: () => deriveUiState(getState()),
   };
+}
+
+/* -----------------------------------------------------------------
+ * Scene cues: a glare marker near the window/desk and a status
+ * bubble above the occupant.  Both are canvas-textured sprites so
+ * they stay legible from the locked camera without cluttering the
+ * room geometry.
+ * ----------------------------------------------------------------- */
+function makeLabelSprite() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512; canvas.height = 160;
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, opacity: 0, depthTest: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.renderOrder = 998;
+  function setText(text, bg) {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const w = canvas.width, h = canvas.height, r = 38;
+    ctx.fillStyle = bg;
+    ctx.beginPath();
+    ctx.moveTo(r, 8); ctx.lineTo(w - r, 8);
+    ctx.arcTo(w - 8, 8, w - 8, r + 8, r); ctx.lineTo(w - 8, h - r - 24);
+    ctx.arcTo(w - 8, h - 24, w - r, h - 24, r); ctx.lineTo(w / 2 + 26, h - 24);
+    ctx.lineTo(w / 2, h - 2); ctx.lineTo(w / 2 - 26, h - 24); ctx.lineTo(r, h - 24);
+    ctx.arcTo(8, h - 24, 8, h - r - 24, r); ctx.lineTo(8, r + 8);
+    ctx.arcTo(8, 8, r, 8, r); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 60px Inter, system-ui, sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, w / 2, (h - 24) / 2 + 8);
+    tex.needsUpdate = true;
+  }
+  return { sprite, setText };
+}
+
+function buildSceneCues() {
+  // Occupant status bubble — floats above the head, follows the occupant.
+  statusBubble = makeLabelSprite();
+  statusBubble.sprite.scale.set(1.15, 0.36, 1);
+  statusBubble.setText('Comfortable', 'rgba(47,143,91,0.92)');
+  if (occupant) {
+    statusBubble.sprite.position.set(0, occupant.userData.angryBaseY + 0.42, 0);
+    occupant.add(statusBubble.sprite);
+  }
+
+  // Glare marker — a soft warning disc near the workstation, shown only
+  // when strong daylight reaches an un-shaded window.
+  const glareCanvas = document.createElement('canvas');
+  glareCanvas.width = 256; glareCanvas.height = 256;
+  const gctx = glareCanvas.getContext('2d');
+  const grad = gctx.createRadialGradient(128, 128, 20, 128, 128, 124);
+  grad.addColorStop(0, 'rgba(255,210,80,0.95)');
+  grad.addColorStop(0.6, 'rgba(255,180,40,0.55)');
+  grad.addColorStop(1, 'rgba(255,180,40,0)');
+  gctx.fillStyle = grad;
+  gctx.beginPath(); gctx.arc(128, 128, 124, 0, Math.PI * 2); gctx.fill();
+  gctx.fillStyle = '#9a5b00';
+  gctx.font = 'bold 92px Inter, system-ui, sans-serif';
+  gctx.textAlign = 'center'; gctx.textBaseline = 'middle';
+  gctx.fillText('☀', 128, 132);
+  const glareTex = new THREE.CanvasTexture(glareCanvas);
+  glareSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: glareTex, transparent: true, opacity: 0, depthTest: false,
+  }));
+  glareSprite.scale.set(0.6, 0.6, 1);
+  glareSprite.position.set(0.45, WINDOW.bottom + WINDOW.height * 0.5, WINDOW.z + 0.9);
+  glareSprite.renderOrder = 997;
+  scene.add(glareSprite);
 }
 
 /* -----------------------------------------------------------------
@@ -639,37 +768,262 @@ function buildFurniture() {
   scene.add(laptopScreen);
 }
 
-// Builds the occupant out of simple primitives.  Arms are stored in
-// userData for animation.
+/*
+ * Facial expression library for the occupant avatar.  Each entry is a set of
+ * normalised channel values the face engine eases toward:
+ *   browLZ / browRZ  brow tilt (asymmetry reads as skepticism / anger)
+ *   browY            brow height (raised = worried, lowered = angry)
+ *   squint           0 open … 1 eyes nearly shut
+ *   cornerY          mouth corners (+ smile, − frown)
+ *   open             mouth openness (panting / shouting)
+ *   warm / cold      cheek flush overlay (red / blue)
+ *   sweat            sweat-bead opacity
+ *   tiltZ / tiltX    head tilt (sideways skepticism / lean-in or recoil)
+ * Names match the OccupantExpression states the design calls for.
+ */
+const EXPRESSIONS = {
+  neutral:            { browLZ: 0,     browRZ: 0,     browY: 0,      squint: 0.05, cornerY: 0,      open: 0,    warm: 0,   cold: 0, sweat: 0,   tiltZ: 0,     tiltX: 0 },
+  skeptical_annoyed:  { browLZ: 0.45,  browRZ: -0.12, browY: 0.004,  squint: 0.30, cornerY: -0.006, open: 0,    warm: 0,   cold: 0, sweat: 0,   tiltZ: 0.12,  tiltX: 0 },
+  tense_uncomfortable:{ browLZ: -0.28, browRZ: 0.28,  browY: 0.011,  squint: 0,    cornerY: -0.004, open: 0.08, warm: 0,   cold: 0, sweat: 0.15, tiltZ: 0,    tiltX: 0.05 },
+  forced_smile:       { browLZ: -0.05, browRZ: 0.05,  browY: 0.008,  squint: 0.32, cornerY: 0.014,  open: 0.04, warm: 0,   cold: 0, sweat: 0,   tiltZ: 0.03,  tiltX: 0 },
+  glare_discomfort:   { browLZ: 0.42,  browRZ: -0.42, browY: -0.012, squint: 0.72, cornerY: -0.006, open: 0.05, warm: 0,   cold: 0, sweat: 0.1, tiltZ: 0.05,  tiltX: -0.06 },
+  too_warm:           { browLZ: -0.1,  browRZ: 0.1,   browY: 0.012,  squint: 0.40, cornerY: -0.002, open: 0.55, warm: 1,   cold: 0, sweat: 1,   tiltZ: 0,     tiltX: 0.05 },
+  too_cold:           { browLZ: -0.22, browRZ: 0.22,  browY: 0.008,  squint: 0.45, cornerY: 0.002,  open: 0,    warm: 0,   cold: 1, sweat: 0,   tiltZ: 0,     tiltX: 0.09 },
+  poor_air_quality:   { browLZ: -0.06, browRZ: 0.06,  browY: 0.006,  squint: 0.50, cornerY: -0.010, open: 0.30, warm: 0,   cold: 0, sweat: 0.5, tiltZ: 0.02,  tiltX: 0.10 },
+  override_rejection: { browLZ: 0.50,  browRZ: -0.50, browY: -0.016, squint: 0.12, cornerY: -0.012, open: 0.70, warm: 0.4, cold: 0, sweat: 0,   tiltZ: 0,     tiltX: -0.08 },
+};
+
+// Map the occupant's derived comfort state (the same source of truth the HUD
+// and head bubble use) to a facial expression, so the avatar can never
+// contradict the rest of the UI.
+function expressionForUi(ui, simState) {
+  switch (ui.cueType) {
+    case 'override': return 'override_rejection';
+    case 'glare':    return 'glare_discomfort';
+    case 'warm':     return 'too_warm';
+    case 'cold':     return 'too_cold';
+    case 'air':      return 'poor_air_quality';
+    case 'annoyed':  return 'skeptical_annoyed';
+  }
+  // No active discomfort cue → comfortable or mildly settling.
+  if (simState.occupant.discomfort >= 0.10) return 'tense_uncomfortable';
+  // Comfortable: a brief forced/awkward smile right after the player pleased
+  // them, otherwise a relaxed neutral.
+  if (game.lastDecision && game.lastDecision.verdict === 'aligned') return 'forced_smile';
+  return 'neutral';
+}
+
+/* -----------------------------------------------------------------
+ * Occupant avatar — an ORIGINAL low-poly "awkward office manager".
+ *
+ * Built entirely from procedural Three.js primitives (no external models,
+ * no textures, no new dependencies).  The figure is intentionally generic:
+ * a stylised office manager with a dark suit, light shirt, muted tie, short
+ * dark hair and an expressive face.  It is NOT a likeness of any real person
+ * or named character — just a relatable, slightly uncomfortable everyman.
+ *
+ * The face exposes a small set of named expression states (see EXPRESSIONS)
+ * that the simulation maps from the occupant's derived comfort state, so the
+ * avatar visibly reacts: skeptical, tense, forced smile, glare squint, too
+ * warm, too cold, poor air, and an override rejection.
+ *
+ * The body rig (arm/leg joints, posture, reach, basePos) and the userData
+ * keys are preserved exactly so the existing walk/override animations and the
+ * floating status bubble keep working untouched.
+ * ----------------------------------------------------------------- */
 function buildOccupant() {
   occupant = new THREE.Group();
-  const skinMat  = new THREE.MeshStandardMaterial({ color: 0xf4c29a, roughness: 0.6 });
-  const shirtMat = new THREE.MeshStandardMaterial({ color: 0x3572b3, roughness: 0.6 });
-  const pantsMat = new THREE.MeshStandardMaterial({ color: 0x2a3548, roughness: 0.7 });
-  const shoeMat  = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.6 });
+  const skinMat   = new THREE.MeshStandardMaterial({ color: 0xe7b48f, roughness: 0.65 });
+  const skinShade = new THREE.MeshStandardMaterial({ color: 0xd79f78, roughness: 0.65 });
+  const jacketMat = new THREE.MeshStandardMaterial({ color: 0x2b3242, roughness: 0.72 });
+  const shirtMat  = new THREE.MeshStandardMaterial({ color: 0xe4ebf2, roughness: 0.55 });
+  const tieMat    = new THREE.MeshStandardMaterial({ color: 0x7d4f63, roughness: 0.6 });
+  const hairMat   = new THREE.MeshStandardMaterial({ color: 0x2a2018, roughness: 0.85 });
+  const pantsMat  = new THREE.MeshStandardMaterial({ color: 0x232a38, roughness: 0.7 });
+  const shoeMat   = new THREE.MeshStandardMaterial({ color: 0x141414, roughness: 0.6 });
+  const browMat   = new THREE.MeshStandardMaterial({ color: 0x271d15, roughness: 0.8 });
+  const eyeWhiteMat = new THREE.MeshStandardMaterial({ color: 0xf6f7f9, roughness: 0.4 });
+  const pupilMat  = new THREE.MeshStandardMaterial({ color: 0x241c1a, roughness: 0.4 });
+  const mouthMat  = new THREE.MeshStandardMaterial({ color: 0x8a4a4a, roughness: 0.6 });
+  const mouthDarkMat = new THREE.MeshStandardMaterial({ color: 0x3a1f25, roughness: 0.6 });
 
-  // Torso: extends up from pelvis (origin)
+  // Torso: a buttoned suit jacket extending up from the pelvis (origin).
   const torsoH = 0.55;
   const torso = new THREE.Mesh(
-    new THREE.BoxGeometry(0.40, torsoH, 0.22), shirtMat
+    new THREE.BoxGeometry(0.42, torsoH, 0.24), jacketMat
   );
   torso.position.set(0, torsoH / 2, 0);
   torso.castShadow = true;
   occupant.add(torso);
 
-  // Neck + head
+  // Suit detailing on the chest (front is local -Z, toward the desk/camera).
+  const frontZ = -0.121;
+  // Light shirt panel showing in the jacket gap.
+  const shirtPanel = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.40, 0.02), shirtMat);
+  shirtPanel.position.set(0, 0.34, frontZ);
+  occupant.add(shirtPanel);
+  // Muted tie + a small knot at the collar.
+  const tie = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.30, 0.02), tieMat);
+  tie.position.set(0, 0.30, frontZ - 0.006);
+  occupant.add(tie);
+  const knot = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.05, 0.025), tieMat);
+  knot.position.set(0, 0.46, frontZ - 0.006);
+  occupant.add(knot);
+  // Jacket lapels angled in over the shirt to leave a V.
+  [-1, 1].forEach((s) => {
+    const lapel = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.34, 0.02), jacketMat);
+    lapel.position.set(s * 0.11, 0.34, frontZ - 0.004);
+    lapel.rotation.z = s * 0.20;
+    occupant.add(lapel);
+  });
+
+  // Neck.
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.065, 0.10, 10), skinMat);
+  neck.position.set(0, torsoH + 0.04, 0);
+  neck.castShadow = true;
+  occupant.add(neck);
+
+  // ---- Head + expressive face -------------------------------------------
+  // Everything facial lives in headGroup so expressions can tilt the whole
+  // head.  headGroup origin sits at the head centre (matches the old head
+  // position), keeping angryBaseY and the status bubble anchor unchanged.
   const headR = 0.15;
-  const head = new THREE.Mesh(new THREE.SphereGeometry(headR, 16, 16), skinMat);
-  head.position.set(0, torsoH + 0.06 + headR, 0);
+  const headGroup = new THREE.Group();
+  headGroup.position.set(0, torsoH + 0.06 + headR, 0);
+  // The body faces the desk (world -X), which would leave the face turned away
+  // from the fixed camera.  Give the head a modest base yaw so the occupant
+  // reads as glancing toward the room/automation, keeping the expressive face
+  // visible.  Expressions only drive rotation.x / rotation.z, so this base yaw
+  // persists.  Body orientation and the walk/override rig are untouched.
+  const HEAD_BASE_YAW = 0.62;
+  headGroup.rotation.y = HEAD_BASE_YAW;
+  occupant.add(headGroup);
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(headR, 18, 18), skinMat);
   head.castShadow = true;
-  occupant.add(head);
+  headGroup.add(head);
+
+  // Short dark hair: a slightly larger capsule shifted up/back so the face
+  // stays bare, plus a small fringe and sideburns.
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(headR + 0.012, 18, 18), hairMat);
+  hair.scale.set(1.02, 0.92, 1.04);
+  hair.position.set(0, 0.045, 0.02);
+  headGroup.add(hair);
+  const fringe = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.05, 0.06), hairMat);
+  fringe.position.set(0, 0.10, -0.118);
+  headGroup.add(fringe);
+  [-1, 1].forEach((s) => {
+    const burn = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.10, 0.05), hairMat);
+    burn.position.set(s * 0.142, 0.0, -0.04);
+    headGroup.add(burn);
+    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.028, 8, 8), skinMat);
+    ear.position.set(s * 0.15, -0.01, 0.0);
+    headGroup.add(ear);
+  });
+
+  const faceZ = -0.132;   // front plane of the face
+
+  // Eyebrows — the main emotional channel.  Each brow pivots about its own
+  // centre so rotation.z + height encodes the expression.
+  function makeBrow(side) {
+    const g = new THREE.Group();
+    g.position.set(side * 0.058, 0.072, faceZ - 0.006);
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(0.072, 0.018, 0.022), browMat);
+    g.add(bar);
+    headGroup.add(g);
+    return g;
+  }
+  const browL = makeBrow(-1);
+  const browR = makeBrow(1);
+  const browBaseY = 0.072;
+
+  // Eyes — white + pupil, grouped so a squint can scale them vertically.
+  function makeEye(side) {
+    const g = new THREE.Group();
+    g.position.set(side * 0.058, 0.022, faceZ);
+    const white = new THREE.Mesh(new THREE.SphereGeometry(0.033, 12, 12), eyeWhiteMat);
+    white.scale.set(1, 1, 0.55);
+    g.add(white);
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.016, 10, 10), pupilMat);
+    pupil.position.set(0, 0, -0.022);
+    g.add(pupil);
+    headGroup.add(g);
+    return g;
+  }
+  const eyeL = makeEye(-1);
+  const eyeR = makeEye(1);
+  const eyeBaseY = 0.022;
+
+  // Upper eyelids (skin) that lower over the eyes to squint.
+  function makeLid(side) {
+    const lid = new THREE.Mesh(new THREE.BoxGeometry(0.066, 0.034, 0.03), skinMat);
+    lid.position.set(side * 0.058, 0.052, faceZ - 0.004);
+    headGroup.add(lid);
+    return lid;
+  }
+  const lidL = makeLid(-1);
+  const lidR = makeLid(1);
+  const lidBaseY = 0.052;
+
+  // Pronounced but generic nose.
+  const nose = new THREE.Mesh(new THREE.BoxGeometry(0.046, 0.078, 0.07), skinShade);
+  nose.position.set(0, -0.008, faceZ - 0.026);
+  headGroup.add(nose);
+
+  // Mouth: a centre line plus two corner cubes whose height encodes
+  // smile/frown, and a dark "open" block that fades in for open-mouth states.
+  const mouthGroup = new THREE.Group();
+  mouthGroup.position.set(0, -0.082, faceZ + 0.004);
+  const mouthLine = new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.014, 0.02), mouthMat);
+  mouthGroup.add(mouthLine);
+  const cornerBaseY = 0;
+  const cornerL = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, 0.02), mouthMat);
+  cornerL.position.set(-0.052, cornerBaseY, 0);
+  mouthGroup.add(cornerL);
+  const cornerR = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.02, 0.02), mouthMat);
+  cornerR.position.set(0.052, cornerBaseY, 0);
+  mouthGroup.add(cornerR);
+  const mouthOpen = new THREE.Mesh(new THREE.BoxGeometry(0.066, 0.05, 0.018), mouthDarkMat);
+  mouthOpen.material.transparent = true;
+  mouthOpen.material.opacity = 0;
+  mouthOpen.position.set(0, -0.012, 0.002);
+  mouthGroup.add(mouthOpen);
+  headGroup.add(mouthGroup);
+
+  // Cheek flush (warm = red, cold = blue) + a sweat bead.  Basic materials so
+  // they read as flat overlays regardless of scene lighting.
+  function makeCheekTint(color) {
+    const m = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0, depthWrite: false });
+    const mesh = new THREE.Mesh(new THREE.SphereGeometry(0.034, 10, 10), m);
+    mesh.scale.set(1, 0.8, 0.4);
+    return mesh;
+  }
+  const cheekWarmL = makeCheekTint(0xe2674a); cheekWarmL.position.set(-0.088, -0.03, faceZ + 0.005);
+  const cheekWarmR = makeCheekTint(0xe2674a); cheekWarmR.position.set(0.088, -0.03, faceZ + 0.005);
+  const cheekColdL = makeCheekTint(0x6fa8d6); cheekColdL.position.set(-0.088, -0.03, faceZ + 0.006);
+  const cheekColdR = makeCheekTint(0x6fa8d6); cheekColdR.position.set(0.088, -0.03, faceZ + 0.006);
+  headGroup.add(cheekWarmL, cheekWarmR, cheekColdL, cheekColdR);
+  const sweatMat = new THREE.MeshBasicMaterial({ color: 0xbfe3f2, transparent: true, opacity: 0, depthWrite: false });
+  const sweat = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.036, 0.012), sweatMat);
+  sweat.position.set(0.108, 0.045, faceZ + 0.01);
+  headGroup.add(sweat);
+
+  // Collect the controllable facial parts for the expression engine.
+  const face = {
+    headGroup, browL, browR, browBaseY, eyeL, eyeR, eyeBaseY,
+    lidL, lidR, lidBaseY, cornerL, cornerR, cornerBaseY, mouthOpen,
+    cheekWarmL, cheekWarmR, cheekColdL, cheekColdR, sweat,
+    // Current (animated) channel values, lerped toward the target each frame.
+    cur: { browLZ: 0, browRZ: 0, browY: 0, squint: 0, cornerY: 0, open: 0, warm: 0, cold: 0, sweat: 0, tiltZ: 0, tiltX: 0 },
+    tgt: Object.assign({}, EXPRESSIONS.neutral),
+  };
 
   // Build a jointed arm: shoulder pivot → upper arm → elbow pivot → forearm.
   function makeArm(side) {
     const shoulder = new THREE.Group();
     shoulder.position.set(side * 0.22, torsoH - 0.05, 0);
     const upper = new THREE.Mesh(
-      new THREE.BoxGeometry(0.09, 0.26, 0.09), shirtMat
+      new THREE.BoxGeometry(0.10, 0.26, 0.10), jacketMat
     );
     upper.position.set(0, -0.13, 0); // hangs down from shoulder
     upper.castShadow = true;
@@ -677,11 +1031,15 @@ function buildOccupant() {
     const elbow = new THREE.Group();
     elbow.position.set(0, -0.26, 0);
     const fore = new THREE.Mesh(
-      new THREE.BoxGeometry(0.08, 0.26, 0.08), skinMat
+      new THREE.BoxGeometry(0.085, 0.24, 0.085), jacketMat
     );
-    fore.position.set(0, -0.13, 0);
+    fore.position.set(0, -0.12, 0);
     fore.castShadow = true;
     elbow.add(fore);
+    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.072, 0.075, 0.072), skinMat);
+    hand.position.set(0, -0.265, 0);
+    hand.castShadow = true;
+    elbow.add(hand);
     shoulder.add(elbow);
     occupant.add(shoulder);
     return { shoulder, elbow };
@@ -780,6 +1138,38 @@ function buildOccupant() {
   angrySprite.renderOrder = 999;
   occupant.add(angrySprite);
 
+  // Point the expression target at a named state (see EXPRESSIONS).  Cheap and
+  // idempotent — just swaps the lerp target; the per-frame updateFace() eases
+  // the visible pose toward it so transitions read as natural reactions.
+  function setExpression(name) {
+    const next = EXPRESSIONS[name] || EXPRESSIONS.neutral;
+    if (face.tgt !== next) face.tgt = next;
+  }
+
+  // Ease the face toward its target and write the channel values onto the
+  // facial meshes.  Called once per render frame.
+  function updateFace() {
+    const c = face.cur, t = face.tgt, k = 0.16;
+    for (const key in c) c[key] += ((t[key] || 0) - c[key]) * k;
+    face.browL.rotation.z = c.browLZ;
+    face.browR.rotation.z = c.browRZ;
+    face.browL.position.y = face.browBaseY + c.browY;
+    face.browR.position.y = face.browBaseY + c.browY;
+    const sq = c.squint;
+    face.lidL.position.y = face.lidBaseY - sq * 0.044;
+    face.lidR.position.y = face.lidBaseY - sq * 0.044;
+    face.eyeL.scale.y = face.eyeR.scale.y = 1 - sq * 0.45;
+    face.cornerL.position.y = face.cornerBaseY + c.cornerY;
+    face.cornerR.position.y = face.cornerBaseY + c.cornerY;
+    face.mouthOpen.material.opacity = c.open;
+    face.mouthOpen.scale.y = 0.35 + c.open * 1.7;
+    face.cheekWarmL.material.opacity = face.cheekWarmR.material.opacity = c.warm * 0.85;
+    face.cheekColdL.material.opacity = face.cheekColdR.material.opacity = c.cold * 0.8;
+    face.sweat.material.opacity = c.sweat;
+    face.headGroup.rotation.z = c.tiltZ;
+    face.headGroup.rotation.x = c.tiltX;
+  }
+
   occupant.userData = {
     leftArm:  lArm.shoulder,
     rightArm: rArm.shoulder,
@@ -794,7 +1184,11 @@ function buildOccupant() {
     basePos: new THREE.Vector3().copy(POS.seated),
     applyPosture,
     angrySprite,
-    angryBaseY: torsoH + 0.06 + headR * 2 + 0.25
+    angryBaseY: torsoH + 0.06 + headR * 2 + 0.25,
+    // Expressive-face engine (original avatar).
+    face,
+    setExpression,
+    updateFace,
   };
 
   // Sit on the chair, facing the desk: desk is at world -X, so rotate +π/2
@@ -1182,37 +1576,296 @@ function onPointerMove(event) {
 }
 
 function onPointerDown(event) {
-  if (state !== 'idle') return;
+  if (state !== 'idle' || game.finished) return;
   const device = getClickedDevice(event);
-  if (device === 'shade')      commandShadeToggle();
-  else if (device === 'therm') commandThermCycle();
-  else if (device === 'switch') commandLightsToggle();
+  if (device === 'shade')       applyAction('shade');
+  else if (device === 'therm')  applyAction('warmer');
+  else if (device === 'switch') applyAction('lights');
 }
 
 /* -----------------------------------------------------------------
- * Player commands — write to the simulation, no scripted occupant.
+ * Player services (the "automation") — each writes one actuator
+ * command to the simulation.  The occupant FSM decides whether to
+ * accept it or stand up and override.  alignment scoring, feedback
+ * and event logging are handled centrally in applyAction().
  * ----------------------------------------------------------------- */
 
-function commandShadeToggle() {
-  if (state !== 'idle') return;
-  const cmds = getCommands();
-  setShadeCmd(cmds.shade > 0.4 ? 0.05 : 0.7);
+const DOMAIN_COLOR = {
+  Shading: 'var(--dom-shading)',
+  HVAC: 'var(--dom-hvac)',
+  Lighting: 'var(--dom-lighting)',
+  'No action': 'var(--dom-none)',
+};
+
+const ACTIONS = [
+  {
+    id: 'shade', domain: 'Shading', target: 'shade',
+    label: (s) => (s.shadePosition < 0.5 ? 'Lower shade' : 'Raise shade'),
+    comfort: (s) => (s.shadePosition < 0.5 ? 'less glare / heat' : 'more daylight / view'),
+    energy: (s) => (s.shadePosition < 0.5 ? '↓ cooling load' : '↑ solar gain'),
+    run: () => { const c = getCommands(); setShadeCmd(c.shade > 0.4 ? 0.05 : 0.7); },
+  },
+  {
+    id: 'warmer', domain: 'HVAC', target: 'thermostat',
+    label: () => 'Warmer',
+    comfort: () => '+ temperature',
+    energy: () => '↑ heating',
+    run: () => { const c = getCommands(); const cur = c.setpoint == null ? 22 : c.setpoint; setSetpointCmd(Math.min(26, cur + 2)); },
+  },
+  {
+    id: 'cooler', domain: 'HVAC', target: 'thermostat',
+    label: () => 'Cooler',
+    comfort: () => '− temperature',
+    energy: () => '↑ cooling',
+    run: () => { const c = getCommands(); const cur = c.setpoint == null ? 22 : c.setpoint; setSetpointCmd(Math.max(18, cur - 2)); },
+  },
+  {
+    id: 'hvac-off', domain: 'HVAC', target: 'thermostat',
+    label: (s) => (s.thermostatSetpoint == null ? 'HVAC on' : 'HVAC off'),
+    comfort: (s) => (s.thermostatSetpoint == null ? 'active control' : 'drifts to ambient'),
+    energy: (s) => (s.thermostatSetpoint == null ? '↑ HVAC' : '↓↓ energy'),
+    run: () => { const c = getCommands(); setSetpointCmd(c.setpoint == null ? 22 : null); },
+  },
+  {
+    id: 'lights', domain: 'Lighting', target: 'lights',
+    label: (s) => (s.lightsOn ? 'Lights off' : 'Lights on'),
+    comfort: (s) => (s.lightsOn ? 'dimmer, softer' : 'brighter task light'),
+    energy: (s) => (s.lightsOn ? '↓ lighting' : '↑ lighting'),
+    run: () => { const c = getCommands(); setLightsCmd(!c.lights); },
+  },
+  {
+    id: 'hold', domain: 'No action', target: null,
+    label: () => 'Hold',
+    comfort: () => 'unchanged',
+    energy: () => 'unchanged',
+    run: () => {},
+  },
+];
+
+// id -> { btn, nameEl, comfortEl, energyEl, def }
+const actionEls = new Map();
+
+function renderActions(simState) {
+  if (!actionsEl) return;
+  actionsEl.innerHTML = '';
+  actionEls.clear();
+  ACTIONS.forEach((def) => {
+    const btn = document.createElement('button');
+    btn.className = 'action-card';
+    btn.type = 'button';
+    btn.dataset.action = def.id;
+
+    const head = document.createElement('div');
+    head.className = 'ac-head';
+    const dot = document.createElement('span');
+    dot.className = 'ac-dot';
+    dot.style.background = DOMAIN_COLOR[def.domain];
+    const name = document.createElement('span');
+    name.className = 'ac-name';
+    head.append(dot, name);
+
+    // Domain sits on its own line below the title so it can never overlap the
+    // action label, regardless of how long either string is.
+    const domain = document.createElement('span');
+    domain.className = 'ac-domain';
+    domain.textContent = def.domain === 'No action' ? '' : def.domain;
+
+    const effects = document.createElement('div');
+    effects.className = 'ac-effects';
+    const comfort = document.createElement('span');
+    const energy = document.createElement('span');
+    effects.append(comfort, energy);
+
+    btn.append(head, domain, effects);
+    btn.addEventListener('click', () => applyAction(def.id));
+    actionsEl.appendChild(btn);
+    actionEls.set(def.id, { btn, nameEl: name, comfortEl: comfort, energyEl: energy, def });
+  });
+  updateActionsState(simState);
 }
 
-// null means thermostat OFF.
-const SETPOINT_CYCLE = [null, 20, 22, 24, 26];
-function commandThermCycle() {
-  if (state !== 'idle') return;
-  const cmds = getCommands();
-  let idx = SETPOINT_CYCLE.findIndex(v => v === cmds.setpoint);
-  if (idx < 0) idx = 0;
-  setSetpointCmd(SETPOINT_CYCLE[(idx + 1) % SETPOINT_CYCLE.length]);
+function updateActionsState(simState) {
+  const locked = game.finished || state !== 'idle';
+  actionEls.forEach(({ btn, nameEl, comfortEl, energyEl, def }) => {
+    nameEl.textContent = def.label(simState);
+    comfortEl.innerHTML = `Comfort <b>${def.comfort(simState)}</b>`;
+    energyEl.innerHTML = `Energy <b>${def.energy(simState)}</b>`;
+    btn.disabled = locked;
+  });
 }
 
-function commandLightsToggle() {
-  if (state !== 'idle') return;
-  const cmds = getCommands();
-  setLightsCmd(!cmds.lights);
+function applyAction(id) {
+  if (game.finished || state !== 'idle') return;
+  const def = ACTIONS.find((a) => a.id === id);
+  if (!def) return;
+
+  const before = getState();
+  const riskBefore = before.occupant.patience01;
+  const alignBefore = game.alignment;
+
+  def.run();
+
+  const after = getState();
+  const overrode = after.occupant.state === 'overriding' || after.occupant.pendingTarget != null;
+
+  let verdict;
+  if (def.target == null) {
+    verdict = before.occupant.discomfort < 0.15 ? 'aligned' : 'partial';
+  } else {
+    verdict = overrode ? 'misaligned' : 'aligned';
+  }
+
+  let delta;
+  if (verdict === 'aligned') { delta = 6; game.aligned++; }
+  else if (verdict === 'partial') { delta = -3; }
+  else {
+    delta = -12; game.misaligned++; game.overrides++;
+    if (game.domainConflicts[def.domain] != null) game.domainConflicts[def.domain]++;
+  }
+  game.alignment = Math.max(0, Math.min(100, game.alignment + delta));
+  game.actionsThisScenario++;
+
+  const reason = buildReason(verdict, def);
+  showFeedback(verdict, def, reason, delta, riskBefore, after.occupant.patience01, before);
+  logEvent(def, before, after, verdict, alignBefore, game.alignment, riskBefore, after.occupant.patience01, reason);
+
+  updateActionsState(after);
+  updateHUD(after);
+}
+
+function buildReason(verdict, def) {
+  const dom = def.domain.toLowerCase();
+  if (verdict === 'misaligned') {
+    return `Occupant rejected the ${dom} change and corrected it manually — that wasn't their preference.`;
+  }
+  if (verdict === 'partial') {
+    return 'You held steady while the occupant was uneasy. Discomfort keeps building toward an override.';
+  }
+  if (def.target == null) {
+    return 'Occupant is comfortable — holding was a safe, low-energy call.';
+  }
+  return `Occupant accepted the ${dom} change. You read their preference correctly.`;
+}
+
+function showFeedback(verdict, def, reason, delta, riskBefore, riskAfter, before) {
+  const verdictText = verdict === 'aligned' ? 'Aligned'
+    : verdict === 'partial' ? 'Partially aligned' : 'Misaligned';
+  const rb = Math.round(riskBefore * 100), ra = Math.round(riskAfter * 100);
+
+  // Record the decision — this is what reveals (and fills) the panel.
+  game.lastDecision = { verdict, domain: def.domain, reason, delta, riskBefore: rb, riskAfter: ra };
+
+  if (!fbPanelEl) return;
+  fbPanelEl.hidden = false;
+  fbPanelEl.classList.remove('aligned', 'partial', 'misaligned');
+  fbPanelEl.classList.add(verdict);
+  if (fbVerdictEl) fbVerdictEl.textContent = `${verdictText} · ${def.domain}`;
+  if (fbReasonEl) fbReasonEl.textContent = reason;
+  if (fbDeltaEl) fbDeltaEl.textContent = `${delta >= 0 ? '+' : ''}${delta} → ${Math.round(game.alignment)}`;
+  if (fbRiskEl) fbRiskEl.textContent = `${rb}% → ${ra}%`;
+}
+
+function logEvent(def, before, after, verdict, alignBefore, alignAfter, riskBefore, riskAfter, reason) {
+  game.log.push({
+    scenario_id: game.scenario,
+    timestamp: new Date().toISOString(),
+    environmental_state: {
+      temperature: Number(before.temperature.toFixed(2)),
+      pmv: Number(before.pmv.toFixed(2)),
+      co2: Math.round(before.co2),
+      lux: Math.round(before.illuminance),
+      humidity: Math.round(before.humidity),
+      time_of_day: Number(before.timeOfDay.toFixed(2)),
+    },
+    action_selected: def.label(before),
+    action_domain: def.domain,
+    aligned: verdict === 'aligned',
+    verdict,
+    alignment_score_before: Math.round(alignBefore),
+    alignment_score_after: Math.round(alignAfter),
+    override_risk_before: Number(riskBefore.toFixed(3)),
+    override_risk_after: Number(riskAfter.toFixed(3)),
+    explanation: reason,
+  });
+}
+
+/* -----------------------------------------------------------------
+ * Scenario progression + end-of-session debrief.
+ * ----------------------------------------------------------------- */
+function maybeAdvanceScenario(simState) {
+  if (game.finished || state !== 'idle') return;
+  const satisfied = simState.occupant.state === 'idle' && simState.occupant.discomfort < 0.05;
+  if (satisfied && game.actionsThisScenario > 0) {
+    if (game.solvedAt === 0) game.solvedAt = performance.now();
+    else if (performance.now() - game.solvedAt > 1200) advanceScenario();
+  } else {
+    game.solvedAt = 0;
+  }
+}
+
+function advanceScenario() {
+  game.solvedAt = 0;
+  game.actionsThisScenario = 0;
+  if (game.scenario >= TOTAL_SCENARIOS) { finishSession(); return; }
+  game.scenario++;
+  resetScenario();
+  setStatus(`scenario ${game.scenario} of ${TOTAL_SCENARIOS} — new occupant, new preferences`);
+}
+
+function dominantConflict() {
+  let dom = 'None', max = 0;
+  for (const k of Object.keys(game.domainConflicts)) {
+    if (game.domainConflicts[k] > max) { max = game.domainConflicts[k]; dom = k; }
+  }
+  return dom;
+}
+
+function automationStyle(dom) {
+  if (game.overrides === 0 || game.alignment >= 90) return 'Occupant-aligned';
+  if (dom === 'HVAC') return 'Comfort-first';
+  if (dom === 'Lighting') return 'Energy-saving but intrusive';
+  if (dom === 'Shading') return 'Glare-sensitive';
+  return 'Occupant-aligned';
+}
+
+function finishSession() {
+  game.finished = true;
+  updateActionsState(getState());
+  const dom = dominantConflict();
+  if (sumScoreEl) sumScoreEl.textContent = String(Math.round(game.alignment));
+  if (sumStyleEl) sumStyleEl.textContent = automationStyle(dom);
+  if (sumDetailEl) {
+    sumDetailEl.innerHTML =
+      `<b>${game.aligned}</b> decisions accepted, <b>${game.misaligned}</b> overridden across ` +
+      `${TOTAL_SCENARIOS} occupants. Dominant tension domain: <b>${dom}</b>.`;
+  }
+  if (summaryEl) summaryEl.classList.add('show');
+  setStatus('session complete');
+}
+
+function restartSession() {
+  game.scenario = 1;
+  game.alignment = 100;
+  game.aligned = 0;
+  game.misaligned = 0;
+  game.overrides = 0;
+  game.domainConflicts = { Shading: 0, HVAC: 0, Lighting: 0 };
+  game.actionsThisScenario = 0;
+  game.solvedAt = 0;
+  game.finished = false;
+  game.lastDecision = null;
+  game.log = [];
+  resetScenario();
+  if (summaryEl) summaryEl.classList.remove('show');
+  if (fbPanelEl) {
+    // No decision yet → hide the panel entirely (no empty "—" chips).
+    fbPanelEl.hidden = true;
+    fbPanelEl.classList.remove('aligned', 'partial', 'misaligned');
+  }
+  setStatus('waiting for interaction');
+  const s = getState();
+  updateActionsState(s);
+  updateHUD(s);
 }
 
 // Sequence for roller shade: RL lowers shade; occupant stands, walks to
@@ -1431,18 +2084,13 @@ function animateMovePath(path, duration, onComplete) {
 function animate() {
   requestAnimationFrame(animate);
   const simState = getState();
-  // Annoyance cue: visible whenever the occupant is not satisfied.
-  // Stays on while overriding so the player sees the angry burst tracking
-  // the occupant as they get up to fix the system.
+  // Legacy generic "angry burst" sprite is retired: it fired on any tiny
+  // discomfort (>0.05) and showed a star even when the occupant was content.
+  // The single type-matched head bubble (statusBubble) now carries all cues,
+  // so keep this sprite permanently faded out.
   if (occupant && occupant.userData.angrySprite) {
-    const occState = simState.occupant.state;
-    const target = (occState === 'overriding' || simState.occupant.discomfort > 0.05) ? 1 : 0;
     const sprite = occupant.userData.angrySprite;
-    sprite.material.opacity += (target - sprite.material.opacity) * 0.12;
-    const bob = Math.sin(performance.now() * 0.009) * 0.05;
-    sprite.position.y = occupant.userData.angryBaseY + bob;
-    const wobble = 1 + Math.sin(performance.now() * 0.015) * 0.08;
-    sprite.scale.set(0.45 * wobble, 0.45 * wobble, 1);
+    sprite.material.opacity += (0 - sprite.material.opacity) * 0.2;
   }
   // Apply current posture (jointed limbs) every frame so seated/standing pose
   // holds even when no movement animation is active.  Drive a stride swing
@@ -1457,6 +2105,12 @@ function animate() {
     const p = occupant.userData.posture;
     const y = SEAT_Y + (STAND_Y - SEAT_Y) * p;
     occupant.position.set(basePos.x, y, basePos.z);
+  }
+  // Drive the avatar's facial expression from the same derived comfort state
+  // the HUD/head-bubble use, then ease the face toward it.
+  if (occupant && occupant.userData.setExpression) {
+    occupant.userData.setExpression(expressionForUi(deriveUiState(simState), simState));
+    occupant.userData.updateFace();
   }
   // Drive device visuals from the simulation state so the player can see
   // their commands take effect (and watch the IEQ react).
@@ -1479,8 +2133,11 @@ function animate() {
     startOverrideAnim(simState.occupant.pendingTarget);
   }
 
-  // Update HUD cards, narrative and mode badge based on current state.
+  // Advance the scenario once the current occupant is satisfied.
+  maybeAdvanceScenario(simState);
+  // Update HUD, diagnosis, action availability and scene cues.
   updateHUD(simState);
+  updateActionsState(simState);
   // Update daylight (sun position, sky colour, ambient lighting) based
   // on the current time of day and the state of the light switch.
   updateDaylight(simState);
@@ -1560,15 +2217,12 @@ function setStatus(text) {
   if (statusEl) statusEl.textContent = `Status: ${text}`;
 }
 
-// Enable or disable all control buttons.  When a sequence is running,
-// all user input should be disabled to prevent overlapping actions.
+// Enable or disable all action cards.  When an override animation is
+// running (or the session is over) all input is disabled to prevent
+// overlapping sequences.
 function setButtons(enabled) {
-  const btns = [shadeBtnEl, thermBtnEl, lightBtnEl];
-  btns.forEach((btn) => {
-    if (!btn) return;
-    btn.disabled = !enabled;
-    btn.style.opacity = enabled ? '1.0' : '0.5';
-    btn.style.cursor = enabled ? 'pointer' : 'default';
+  actionEls.forEach(({ btn }) => {
+    btn.disabled = !enabled || game.finished;
   });
 }
 
@@ -1593,63 +2247,244 @@ function updateACVisual(on) {
   acLedMesh.material.emissiveIntensity = on ? 1.2 : 0.0;
 }
 
-// Update the heads‑up display with live simulation metrics and actuator states.
+// Classify the room's primary issue from live metrics.  Returns a small
+// descriptor used by both the diagnosis card and the occupant bubble.
+function diagnose(simState) {
+  const shadeUp = simState.shadePosition < 0.5;
+  const glare = simState.illuminance > 2500 && shadeUp;
+  if (glare) {
+    return {
+      key: 'glare', bubble: 'Too bright',
+      issue: 'Strong daylight is reaching the workstation — glare risk is high while the shade is up.',
+      priority: 'Visual comfort', conflict: 'Glare vs. daylight & view',
+    };
+  }
+  if (simState.occupant.thermal === 'warm') {
+    return {
+      key: 'warm', bubble: 'Too warm',
+      issue: 'The space is above the comfort band — cool it with the AC (lower the setpoint) and lower the shade to block solar gain.',
+      priority: 'Thermal comfort', conflict: 'Cooling vs. energy use',
+    };
+  }
+  if (simState.occupant.thermal === 'cold') {
+    return {
+      key: 'cold', bubble: 'Too cold',
+      issue: 'The space is below the comfort band — warm it with the AC (raise the setpoint) and raise the shade to admit solar gain.',
+      priority: 'Thermal comfort', conflict: 'Heating vs. energy use',
+    };
+  }
+  if (simState.co2 > 900) {
+    return {
+      key: 'stuffy', bubble: 'Stuffy',
+      issue: 'CO₂ is elevated — air feels stale near the desk.',
+      priority: 'Air quality', conflict: 'Fresh air vs. thermal stability',
+    };
+  }
+  return {
+    key: 'ok', bubble: 'Comfortable',
+    issue: 'Conditions are within the comfort band. Hold, or fine-tune a service.',
+    priority: 'Maintain comfort', conflict: 'Comfort vs. energy use',
+  };
+}
+
+// Visual vocabulary for the floating head cue, keyed by cueType from
+// deriveUiState().  Glyph + colour are matched to the source of discomfort.
+// Comfortable / mildly-uneasy states map to no cueType, so nothing floats.
+const CUE_VISUAL = {
+  glare:    { text: '☀ Too bright',    bg: 'rgba(192,138,42,0.94)' },
+  warm:     { text: '♨ Too warm',      bg: 'rgba(194,90,47,0.94)' },
+  cold:     { text: '❄ Too cold',      bg: 'rgba(47,110,170,0.94)' },
+  air:      { text: '≋ Stuffy',        bg: 'rgba(110,120,70,0.94)' },
+  annoyed:  { text: '• Annoyed',       bg: 'rgba(192,138,42,0.94)' },
+  override: { text: '⚠ Would override', bg: 'rgba(194,73,47,0.94)' },
+};
+
+/*
+ * Single source of truth for every player-facing label.  All HUD panels read
+ * from this one derived object so the occupant state, override risk, situation
+ * card, bubble and 3D cue can never contradict each other.
+ *
+ * Concepts (kept explicit per the design):
+ *   - occupant state   : whether the occupant is comfortable / uneasy / overriding
+ *   - currentIssue     : the specific problem, or 'none'
+ *   - overrideRisk     : probability the occupant rejects the current setup
+ *                        (occupant-only — NOT energy)
+ *   - lastDecision     : result of the last action (drives the feedback panel)
+ *   - alignmentScore   : accumulated score (read directly from game.alignment)
+ *
+ * Rule: "Risk = what may happen before action.  Alignment = accumulated score
+ * from past decisions.  Last decision = result after the user acts."
+ */
+function deriveUiState(simState) {
+  const occ = simState.occupant;
+  const d = diagnose(simState);
+
+  // Severity bucket from the OCCUPANT — authoritative for whether anything is
+  // wrong.  The environment diagnosis only names the issue once one exists.
+  let bucket;
+  if (occ.state === 'overriding')                       bucket = 'override';
+  else if (occ.state === 'annoyed' || occ.discomfort >= 0.25) bucket = 'bad';
+  else if (occ.discomfort >= 0.10)                      bucket = 'mild';
+  else                                                  bucket = 'ok';
+
+  // Override risk derived from patience, but clamped to agree with the bucket
+  // so the gauge never says "High" while the occupant looks comfortable.
+  let riskFraction = occ.patience01;
+  if (bucket === 'ok')         riskFraction = Math.min(riskFraction, 0.18);
+  else if (bucket === 'mild')  riskFraction = Math.min(Math.max(riskFraction, 0.22), 0.50);
+  else if (bucket === 'bad')   riskFraction = Math.max(riskFraction, 0.45);
+  else                         riskFraction = 1.0;
+  const overrideRisk = riskFraction < 0.20 ? 'Low' : riskFraction < 0.55 ? 'Medium' : 'High';
+
+  // Comfortable defaults.
+  let occupantState = 'Comfortable', stateClass = '';
+  let bubbleText = null, cueType = null, currentIssue = null;
+  let situationHeadline = 'Conditions are within the comfort band. Holding is reasonable.';
+  let likelyPriority = 'Maintain comfort';
+  let conflict = 'Comfort vs. energy';
+
+  if (bucket === 'override') {
+    occupantState = 'Overriding you'; stateClass = 'is-override';
+    bubbleText = CUE_VISUAL.override.text; cueType = 'override';
+    currentIssue = 'Override in progress';
+    situationHeadline = 'The occupant is correcting a setting you chose.';
+    likelyPriority = 'Restore their setting';
+    conflict = 'Your command vs. their preference';
+  } else if (bucket === 'mild') {
+    occupantState = 'Settling'; stateClass = '';
+    bubbleText = 'Acceptable'; cueType = null;   // mild unease shows no floating symbol
+    currentIssue = 'Minor unease';
+    situationHeadline = 'Conditions are acceptable but not ideal. A small adjustment may help.';
+    likelyPriority = 'Fine-tune comfort';
+  } else if (bucket === 'bad') {
+    occupantState = 'Uneasy'; stateClass = 'is-annoyed';
+    switch (d.key) {
+      case 'glare':
+        bubbleText = CUE_VISUAL.glare.text; cueType = 'glare'; currentIssue = 'Glare risk';
+        situationHeadline = 'Strong daylight is reaching the workstation — glare risk is high.';
+        likelyPriority = 'Visual comfort'; conflict = 'Glare vs. daylight & view'; break;
+      case 'warm':
+        bubbleText = CUE_VISUAL.warm.text; cueType = 'warm'; currentIssue = 'Too warm';
+        situationHeadline = 'Above the comfort band — cool with the AC and lower the shade.';
+        likelyPriority = 'Thermal comfort'; conflict = 'Cooling vs. energy'; break;
+      case 'cold':
+        bubbleText = CUE_VISUAL.cold.text; cueType = 'cold'; currentIssue = 'Too cold';
+        situationHeadline = 'Below the comfort band — warm with the AC and raise the shade.';
+        likelyPriority = 'Thermal comfort'; conflict = 'Heating vs. energy'; break;
+      case 'stuffy':
+        bubbleText = CUE_VISUAL.air.text; cueType = 'air'; currentIssue = 'Poor air';
+        situationHeadline = 'CO₂ is rising — the air near the desk is getting stuffy.';
+        likelyPriority = 'Air quality'; conflict = 'Fresh air vs. thermal stability'; break;
+      default:
+        // Occupant is annoyed by a hidden-preference mismatch the environment
+        // metrics don't flag (e.g. wants the thermostat off at a neutral temp).
+        bubbleText = CUE_VISUAL.annoyed.text; cueType = 'annoyed'; currentIssue = 'Setting mismatch';
+        situationHeadline = 'The occupant is unsettled by one of your current settings.';
+        likelyPriority = 'Find their preference'; conflict = 'Automation vs. preference'; break;
+    }
+  }
+
+  return {
+    occupantState, stateClass, currentIssue,
+    bubbleText, cueType,
+    situationHeadline, likelyPriority, conflict,
+    overrideRisk, riskFraction,
+    showLastDecision: !!game.lastDecision,
+  };
+}
+
+// Update the heads‑up display with live simulation metrics, alignment
+// scoring, the diagnosis card and the 3D scene cues.  Called every frame;
+// does not mutate the simulation.
 function updateHUD(simState) {
-  // Update the heads‑up display with live simulation metrics and actuator states.
-  // This function is called every frame and does not mutate the simulation.
   if (!simState) return;
-  // Format time of day into HH:MM (24‑hour clock) and update the time card.
+  const occ = simState.occupant;
+
+  // --- Metric chips ---
   const hrs = Math.floor(simState.timeOfDay);
   const mins = Math.floor((simState.timeOfDay % 1) * 60);
-  const timeString = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
-  if (valTimeEl) valTimeEl.textContent = timeString;
-  // Comfort metrics from the data source.  Round values appropriately.
-  if (valPmvEl) valPmvEl.textContent  = simState.pmv.toFixed(2);
+  if (valTimeEl) valTimeEl.textContent = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
+  if (valPmvEl) {
+    valPmvEl.textContent = simState.pmv.toFixed(2);
+    valPmvEl.className = 'chip-value' + (Math.abs(simState.pmv) > 0.5 ? ' warn' : '');
+  }
   if (valTempEl) valTempEl.textContent = `${simState.temperature.toFixed(1)}°C`;
-  if (valCo2El) valCo2El.textContent   = `${Math.round(simState.co2)}ppm`;
-  if (valLuxEl) valLuxEl.textContent   = `${Math.round(simState.illuminance)}`;
-  if (valHumEl) valHumEl.textContent   = `${Math.round(simState.humidity)}%`;
-  // Actuator state cards.  Shade percentage is derived from the current
-  // shade mesh scale; thermostat setpoint and mode come from the
-  // simulation state; lighting and AC states use module globals.
+  if (valCo2El) {
+    valCo2El.textContent = `${Math.round(simState.co2)}ppm`;
+    valCo2El.className = 'chip-value' + (simState.co2 > 900 ? ' warn' : '');
+  }
+  if (valLuxEl) {
+    valLuxEl.textContent = `${Math.round(simState.illuminance)}`;
+    valLuxEl.className = 'chip-value' + (simState.illuminance > 2500 ? ' warn' : '');
+  }
+  if (valHumEl) valHumEl.textContent = `${Math.round(simState.humidity)}%`;
+
+  // --- Actuator chips ---
   const shadePct = Math.round(shadeFabric.scale.y * 100);
   if (valShadeEl) valShadeEl.textContent = shadePct >= 50 ? 'Down' : 'Up';
-  if (valLightsEl) valLightsEl.textContent = switchOn ? 'ON' : 'OFF';
+  if (valLightsEl) valLightsEl.textContent = switchOn ? 'On' : 'Off';
   if (valAcEl) valAcEl.textContent = acRunning ? 'ON' : 'OFF';
   if (valThermEl) {
     valThermEl.textContent = simState.thermostatSetpoint == null
-      ? 'OFF'
-      : `${simState.thermostatSetpoint.toFixed(1)}°C`;
+      ? 'Off'
+      : `${simState.thermostatSetpoint.toFixed(0)}°C`;
   }
-  if (annoyanceBarEl) annoyanceBarEl.style.width = `${(simState.occupant.patience01 * 100).toFixed(0)}%`;
-  // Narrative reacts to the occupant's FSM state without revealing prefs.
-  if (narrativeEl) {
-    let narrative;
-    if (simState.occupant.state === 'overriding') {
-      narrative = '😤 Too late — they got up to fix it themselves.';
-    } else if (simState.occupant.state === 'annoyed') {
-      narrative = '⚠️ Something\'s off. Try a different setting before they snap.';
-    } else if (simState.pmv > 0.6) {
-      narrative = '🔥 It\'s getting warm in here — act fast.';
-    } else if (simState.pmv < -0.6) {
-      narrative = '🥶 Brr! Warm it up.';
-    } else {
-      narrative = '🕹️ Control the blinds, thermostat, and lights — keep the occupant happy. Can you crack their comfort code?';
-    }
-    narrativeEl.textContent = narrative;
+
+  // --- Single source of truth for every player-facing label ---
+  const ui = deriveUiState(simState);
+
+  // --- Occupant state chip + issue chip ---
+  if (occStateEl) {
+    occStateEl.classList.remove('is-annoyed', 'is-override');
+    occStateEl.textContent = ui.occupantState;
+    if (ui.stateClass) occStateEl.classList.add(ui.stateClass);
   }
-  // Mode badge highlights when the occupant has taken over.
-  if (modeBadgeEl) {
-    if (simState.occupant.state === 'overriding') {
-      modeBadgeEl.style.background = '#d35400';
-      modeBadgeEl.textContent = '🙋 OCCUPANT OVERRIDING YOU';
-    } else if (simState.occupant.state === 'annoyed') {
-      modeBadgeEl.style.background = '#c0922a';
-      modeBadgeEl.textContent = '⚠️ OCCUPANT GETTING ANNOYED';
+  if (occIssueEl) {
+    if (ui.currentIssue) {
+      occIssueEl.textContent = ui.currentIssue;
+      occIssueEl.hidden = false;
     } else {
-      modeBadgeEl.style.background = '#1a6bb5';
-      modeBadgeEl.textContent = '🎮 YOU ARE THE AUTOMATION';
+      occIssueEl.hidden = true;
     }
+  }
+  // Mode badge is static — the player is always the automation.  Dynamic
+  // occupant mood lives in the occupant chip, so the badge no longer duplicates it.
+
+  // --- Alignment + override-risk gauges ---
+  if (alignScoreEl) alignScoreEl.textContent = String(Math.round(game.alignment));
+  if (alignMarkerEl) alignMarkerEl.style.left = `${Math.max(0, Math.min(100, game.alignment))}%`;
+  if (riskFillEl) {
+    const p = ui.riskFraction;
+    riskFillEl.style.width = `${Math.round(p * 100)}%`;
+    riskFillEl.style.background = p < 0.2 ? 'var(--green)' : p < 0.55 ? 'var(--amber)' : 'var(--red)';
+  }
+  if (riskValEl) riskValEl.textContent = ui.overrideRisk;
+
+  // --- Scenario counter ---
+  if (scnNowEl) scnNowEl.textContent = String(game.scenario);
+  if (scnOverridesEl) scnOverridesEl.textContent = String(game.overrides);
+
+  // --- Situation card (state-generated) ---
+  if (diagIssueEl) diagIssueEl.textContent = ui.situationHeadline;
+  if (diagPriorityEl) diagPriorityEl.textContent = ui.likelyPriority;
+  if (diagRiskEl) diagRiskEl.textContent = ui.overrideRisk;
+  if (diagConflictEl) diagConflictEl.textContent = ui.conflict;
+
+  // --- Feedback panel visibility: only once the player has acted ---
+  if (fbPanelEl) fbPanelEl.hidden = !ui.showLastDecision;
+
+  // --- 3D scene cues (state-specific; silent when comfortable) ---
+  if (statusBubble) {
+    const cue = ui.cueType ? CUE_VISUAL[ui.cueType] : null;
+    const mat = statusBubble.sprite.material;
+    if (cue) statusBubble.setText(cue.text, cue.bg);
+    mat.opacity += ((cue ? 1 : 0) - mat.opacity) * 0.12;
+  }
+  if (glareSprite) {
+    // The desk glare marker only lights when glare is the active issue, so it
+    // never appears for a comfortable occupant or a non-visual problem.
+    const glareOn = ui.cueType === 'glare' ? 1 : 0;
+    glareSprite.material.opacity += (glareOn - glareSprite.material.opacity) * 0.1;
   }
 }
 
@@ -1714,3 +2549,10 @@ function updateDaylight(simState) {
     skyMesh.material.color.setHex(0x9bd4f0);
   }
 }
+
+/* -----------------------------------------------------------------
+ * Bootstrap — run last so all module-level const declarations
+ * (ACTIONS, DOMAIN_COLOR, actionEls, …) are initialised first.
+ * ----------------------------------------------------------------- */
+init();
+animate();

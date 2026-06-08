@@ -40,13 +40,32 @@ let _T   = 22.0;
 let _CO2 = 450;
 let _hum = 45;
 
-// Hidden occupant preferences — randomized once per session.  Only
-// preferences over directly controllable actuators, so the player can
-// always reach a fully satisfied state.
+// Hidden occupant configuration — one coherent "comfort driver" per scenario.
+// The driver keeps the diagnosed issue and its resolving action consistent, and
+// guarantees that THERMAL comfort is only ever solved by the AC (setpoint) and
+// the shade (solar gain) — never by the lights.  A `null` preference on an
+// actuator means the occupant has no opinion about it (and never overrides it).
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-const _tPref     = pick([null, 20, 22, 24]);   // null = wants thermostat OFF
-const _shadePref = pick([0.05, 0.7]);          // open vs closed
-const _lightPref = pick([true, false]);        // wants ceiling lights on or off
+let _tPref     = 22;     // preferred setpoint °C, or null = wants thermostat OFF
+let _shadePref = null;   // 0.05 up / 0.7 down, or null = no preference
+let _lightPref = null;   // true / false, or null = no preference
+
+// Pick a fresh comfort driver and derive coherent preferences from it:
+//   warm  → occupant too warm → cool it: lower setpoint (AC cools) + shade down
+//   cold  → occupant too cold → warm it: raise setpoint (AC heats) + shade up
+//   glare → daylight glare     → shade down (visual); temperature neutral
+//   light → lighting opinion   → lights on/off (visual); temp & shade neutral
+//   off   → prefers the thermostat OFF (comfortable on ambient / saving energy)
+function configureScenario() {
+  switch (pick(['warm', 'cold', 'glare', 'light', 'off'])) {
+    case 'warm':  _tPref = 20;  _shadePref = 0.7;  _lightPref = null; break;
+    case 'cold':  _tPref = 24;  _shadePref = 0.05; _lightPref = null; break;
+    case 'glare': _tPref = 22;  _shadePref = 0.7;  _lightPref = null; break;
+    case 'light': _tPref = 22;  _shadePref = null; _lightPref = pick([true, false]); break;
+    case 'off':   _tPref = null; _shadePref = null; _lightPref = null; break;
+  }
+}
+configureScenario();
 
 // Occupant FSM.
 let _occState       = 'idle';   // 'idle' | 'annoyed' | 'overriding'
@@ -56,6 +75,7 @@ const PATIENCE_THRESHOLD = 6.0; // seconds of strong sustained discomfort
 
 // Cached aux for getState().
 let _lux = 400, _pmv = 0, _discomfort = 0, _sunCurve = 0;
+let _thermal = 'ok';   // 'warm' | 'cold' | 'ok' — occupant's thermal comfort
 
 function tick() {
   const now = performance.now();
@@ -92,7 +112,10 @@ function tick() {
   else                                         _acMode = 'HEAT';
 
   // --- Thermal model (lumped, target-based, faster response) ---
-  const passiveLoad = 7.0 * _sunCurve * (1 - _shadePos * 0.9) + 1.5 + (_lights ? 0.8 : 0);
+  // Only the AC (setpoint) and the shade (solar gain) move temperature.  Solar
+  // gain is admitted with the shade up and blocked with it down; the lights are
+  // thermally neutral, so cooling/heating is never a lighting decision.
+  const passiveLoad = 7.0 * _sunCurve * (1 - _shadePos * 0.9) + 1.5;
   const T_passive   = T_out + passiveLoad;
   const T_target    = _acRunning ? _setpoint : T_passive;
   _T += (T_target - _T) * (dt / 4.0);
@@ -119,9 +142,19 @@ function tick() {
   if (_setpoint === null && _tPref === null)       cT = 0;
   else if (_setpoint === null || _tPref === null)  cT = 0.6;   // wants OFF, got ON, or vice versa
   else                                              cT = Math.max(0, Math.abs(_setpoint - _tPref) - 0.5) * 0.5;
-  const cShade = Math.abs(_shadePos - _shadePref) * 0.5;
-  const cLight = (_lights !== _lightPref) ? 0.20 : 0;
+  const cShade = (_shadePref === null) ? 0 : Math.abs(_shadePos - _shadePref) * 0.5;
+  const cLight = (_lightPref === null) ? 0 : (_lights !== _lightPref ? 0.30 : 0);
   _discomfort  = cT + cShade + cLight;
+
+  // Objective thermal state, relative to the occupant's preferred temperature.
+  // This drives the warm/cold diagnosis, so "too warm" / "too cold" always names
+  // a real thermal gap the player closes with the AC (and shade) — never lights.
+  if (_tPref === null) {
+    _thermal = 'ok';
+  } else {
+    const tErr = _T - _tPref;
+    _thermal = tErr > 1.2 ? 'warm' : tErr < -1.2 ? 'cold' : 'ok';
+  }
 
   // --- Occupant FSM ---
   // Annoyance only — overrides are triggered by *wrong player commands*,
@@ -139,8 +172,8 @@ function tick() {
 
 // True if the new command for this actuator mismatches the occupant's pref.
 function isMismatch(target, v) {
-  if (target === 'shade')  return Math.abs(v - _shadePref) > 0.3;
-  if (target === 'lights') return v !== _lightPref;
+  if (target === 'shade')  return _shadePref !== null && Math.abs(v - _shadePref) > 0.3;
+  if (target === 'lights') return _lightPref !== null && v !== _lightPref;
   if (target === 'thermostat') {
     if (v === null && _tPref === null)      return false;
     if (v === null || _tPref === null)      return true;
@@ -219,10 +252,22 @@ export function getState() {
       pendingTarget: _pendingTarget,
       patience01: _patience / PATIENCE_THRESHOLD,
       discomfort: _discomfort,
+      thermal: _thermal,
     },
   };
 }
 
 export function reportOccupantOverride(device, value) {
   console.log(`[DataSource] Occupant override: ${device} → ${value}`);
+}
+
+// Randomise a fresh hidden-preference configuration for the next scenario and
+// reset the occupant FSM.  Actuator commands are left as-is so the player must
+// re-discover the new occupant by acting.
+export function resetScenario() {
+  configureScenario();
+  _occState      = 'idle';
+  _pendingTarget = null;
+  _patience      = 0;
+  _discomfort    = 0;
 }

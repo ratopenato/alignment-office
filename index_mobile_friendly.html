@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Comfort Quest</title>
+
+  <style>
+    :root {
+      --panel-bg: rgba(255, 255, 255, 0.92);
+      --panel-border: rgba(15, 36, 56, 0.10);
+      --text-main: #0f2438;
+      --text-muted: #5b6f82;
+      --blue: #1a6bb5;
+      --orange: #d35400;
+      --shadow: 0 8px 22px rgba(15, 36, 56, 0.14);
+    }
+
+    html,
+    body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #dfeaf3;
+      color: var(--text-main);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: geometricPrecision;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      touch-action: none;
+    }
+
+    #hud {
+      position: fixed;
+      top: 10px;
+      left: 10px;
+      right: 10px;
+      z-index: 10;
+      display: grid;
+      grid-template-columns: 1.2fr 1.65fr 0.9fr;
+      gap: 12px;
+      align-items: center;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: var(--panel-bg);
+      border: 1px solid var(--panel-border);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(8px);
+      font-size: 13px;
+    }
+
+    #hud h1 {
+      margin: 0 0 4px;
+      font-size: 18px;
+      line-height: 1.1;
+      letter-spacing: -0.02em;
+    }
+
+    #hud p {
+      margin: 0 0 8px;
+      line-height: 1.25;
+      color: #183b5b;
+    }
+
+    #mode-badge {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--blue);
+      color: #fff;
+      font-weight: 800;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    #narrative {
+      margin-top: 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+      min-height: 18px;
+      line-height: 1.35;
+    }
+
+    .alignment-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 8px;
+      align-items: center;
+      margin-top: 8px;
+      font-size: 12px;
+      color: #425466;
+    }
+
+    #alignment-bar {
+      height: 8px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #3fbf7f 0%, #f7c948 55%, #e76f51 100%);
+      overflow: hidden;
+      position: relative;
+    }
+
+    #alignment-fill {
+      height: 100%;
+      width: 35%;
+      background: rgba(255, 255, 255, 0.55);
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      gap: 8px;
+    }
+
+    .metric-card {
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      border-radius: 8px;
+      padding: 7px 9px;
+      min-height: 42px;
+    }
+
+    .metric-label {
+      font-size: 11px;
+      color: #6b7b88;
+      margin-bottom: 2px;
+    }
+
+    .metric-value {
+      font-size: 15px;
+      line-height: 1.1;
+      font-weight: 850;
+      color: var(--text-main);
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 8px;
+      margin-top: 8px;
+      font-size: 11px;
+    }
+
+    .metrics span {
+      color: #6b7b88;
+    }
+
+    .metrics strong {
+      display: block;
+      color: var(--text-main);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    button {
+      border: 1px solid #c9d3dc;
+      border-radius: 7px;
+      background: #f7f8fa;
+      color: #172b3a;
+      font-weight: 650;
+      padding: 7px 10px;
+      cursor: pointer;
+      font: inherit;
+    }
+
+    button:hover {
+      background: #eef3f7;
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    button:disabled {
+      opacity: 0.45;
+      cursor: default;
+      transform: none;
+    }
+
+    #status {
+      margin-top: 8px;
+      color: #005a92;
+      font-weight: 850;
+      font-size: 12px;
+    }
+
+    #credit-footer {
+      position: fixed;
+      bottom: 10px;
+      left: 0;
+      width: 100%;
+      text-align: center;
+      z-index: 20;
+      font-size: 12px;
+      color: rgba(15, 36, 56, 0.75);
+      pointer-events: none;
+    }
+
+    #credit-footer a {
+      color: rgba(0, 90, 146, 0.95);
+      font-weight: 800;
+      text-decoration: none;
+      pointer-events: auto;
+    }
+
+    #credit-footer a:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 1050px) {
+      #hud {
+        grid-template-columns: 1fr;
+        max-height: 46vh;
+        overflow-y: auto;
+      }
+
+      .cards {
+        grid-template-columns: repeat(2, minmax(120px, 1fr));
+      }
+
+      .metrics {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+
+    /*
+      Mobile layout:
+      - The 3D scene stays full-screen.
+      - The HUD becomes compact at the top.
+      - The controls become a bottom game-like control pad.
+      - Metrics stay readable without covering the entire scene.
+    */
+    @media (max-width: 768px) {
+      html,
+      body {
+        overflow: hidden;
+        touch-action: manipulation;
+      }
+
+      #hud {
+        top: calc(8px + env(safe-area-inset-top));
+        left: 8px;
+        right: 8px;
+        display: block;
+        max-height: 42vh;
+        overflow-y: auto;
+        padding: 10px;
+        border-radius: 14px;
+        font-size: 12px;
+      }
+
+      #hud h1 {
+        font-size: 16px;
+        margin-bottom: 4px;
+      }
+
+      #hud p {
+        font-size: 12px;
+        line-height: 1.25;
+        margin-bottom: 6px;
+      }
+
+      #mode-badge {
+        font-size: 11px;
+        padding: 5px 8px;
+      }
+
+      #narrative {
+        font-size: 11px;
+        min-height: 16px;
+        margin-top: 6px;
+      }
+
+      .alignment-row {
+        display: none;
+      }
+
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(94px, 1fr));
+        overflow-x: auto;
+        gap: 6px;
+        padding-bottom: 4px;
+        margin-top: 8px;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+      }
+
+      .cards::-webkit-scrollbar {
+        display: none;
+      }
+
+      .metric-card {
+        min-width: 94px;
+        padding: 6px;
+      }
+
+      .metric-label {
+        font-size: 10px;
+      }
+
+      .metric-value {
+        font-size: 13px;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(68px, 1fr));
+        overflow-x: auto;
+        gap: 6px;
+        padding-bottom: 4px;
+        margin-top: 6px;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+      }
+
+      .metrics::-webkit-scrollbar {
+        display: none;
+      }
+
+      .metrics div {
+        min-width: 68px;
+      }
+
+      .metrics span {
+        font-size: 10px;
+      }
+
+      .metrics strong {
+        font-size: 11px;
+      }
+
+      .controls {
+        position: fixed;
+        left: 8px;
+        right: 8px;
+        bottom: calc(30px + env(safe-area-inset-bottom));
+        z-index: 30;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 8px;
+        padding: 10px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid var(--panel-border);
+        box-shadow: 0 8px 24px rgba(15, 36, 56, 0.18);
+        backdrop-filter: blur(8px);
+      }
+
+      button {
+        width: 100%;
+        min-height: 44px;
+        font-size: 14px;
+        border-radius: 10px;
+      }
+
+      #status {
+        position: fixed;
+        left: 10px;
+        right: 10px;
+        bottom: calc(184px + env(safe-area-inset-bottom));
+        z-index: 31;
+        margin: 0;
+        padding: 6px 8px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid var(--panel-border);
+        box-shadow: 0 4px 14px rgba(15, 36, 56, 0.10);
+        font-size: 11px;
+      }
+
+      #credit-footer {
+        bottom: calc(6px + env(safe-area-inset-bottom));
+        font-size: 11px;
+      }
+    }
+
+    @media (max-width: 420px) {
+      #hud {
+        max-height: 38vh;
+      }
+
+      .controls {
+        bottom: calc(28px + env(safe-area-inset-bottom));
+      }
+
+      #status {
+        bottom: calc(182px + env(safe-area-inset-bottom));
+      }
+    }
+
+    @media (orientation: landscape) and (max-height: 520px) {
+      #hud {
+        max-height: 36vh;
+      }
+
+      .controls {
+        grid-template-columns: repeat(3, 1fr);
+      }
+
+      #status {
+        bottom: calc(88px + env(safe-area-inset-bottom));
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div id="hud">
+    <section>
+      <h1>🎮 Comfort Quest</h1>
+      <p>🤖 Control the blinds, thermostat, and lights — keep the occupant happy. Can you crack their comfort code?</p>
+      <div id="mode-badge">🎮 YOU ARE THE AUTOMATION</div>
+      <div id="narrative">😊 Aligned</div>
+      <div class="alignment-row">
+        <span>😊 Aligned</span>
+        <div id="alignment-bar"><div id="alignment-fill"></div></div>
+        <span>🫣 Misaligned</span>
+      </div>
+    </section>
+
+    <section>
+      <div class="cards">
+        <div class="metric-card" id="card-shade">
+          <div class="metric-label">🪟 Shade</div>
+          <div class="metric-value" id="val-shade">Up</div>
+        </div>
+        <div class="metric-card" id="card-therm">
+          <div class="metric-label">🌡 Thermostat</div>
+          <div class="metric-value" id="val-therm">22°C</div>
+        </div>
+        <div class="metric-card" id="card-lights">
+          <div class="metric-label">💡 Lights</div>
+          <div class="metric-value" id="val-lights">ON</div>
+        </div>
+        <div class="metric-card" id="card-ac">
+          <div class="metric-label">❄️ AC</div>
+          <div class="metric-value" id="val-ac">OFF</div>
+        </div>
+      </div>
+
+      <div class="metrics">
+        <div><span>PMV</span><strong id="val-pmv">0.0</strong></div>
+        <div><span>Temp</span><strong id="val-temp">22°C</strong></div>
+        <div><span>CO₂</span><strong id="val-co2">400ppm</strong></div>
+        <div><span>Lux</span><strong id="val-lux">300</strong></div>
+        <div><span>Humidity</span><strong id="val-hum">45%</strong></div>
+        <div><span>Time</span><strong id="val-time">08:00</strong></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="controls">
+        <button id="shadeBtn">Lower shade</button>
+        <button id="thermBtn">Change thermostat</button>
+        <button id="lightBtn">Dim lights</button>
+      </div>
+      <div id="status">Status: waiting for interaction</div>
+    </section>
+  </div>
+
+  <footer id="credit-footer">
+    Developed by
+    <a href="https://pablomartinezalcaraz.com/" target="_blank" rel="noopener noreferrer">
+      Rato Penato
+    </a>
+  </footer>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

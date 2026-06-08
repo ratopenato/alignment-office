@@ -3,131 +3,439 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Interactive Office - Shades, HVAC and Lighting</title>
+  <title>The Alignment Office</title>
   <style>
-    /* Basic layout: fill the window and hide scrollbars */
-    html, body {
-      margin: 0;
-      padding: 0;
-      height: 100%;
-      overflow: hidden;
-      font-family: sans-serif;
-      background: #e3edf6;
-    }
-    #hud {
-      position: absolute;
-      top: 8px;
-      left: 8px;
-      right: 8px;
-      background: rgba(255,255,255,0.88);
-      padding: 8px 12px;
-      border-radius: 8px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-      color: #102a44;
-      z-index: 10;
-      font-size: 12px;
-      display: grid;
-      grid-template-columns: minmax(240px, 1.4fr) 2fr 1.3fr;
-      grid-gap: 12px;
-      align-items: center;
-    }
-    #hud button {
-      padding: 4px 8px;
-      font-size: 12px;
-    }
-    .hud-section { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-    .hud-title { font-weight: 800; font-size: 15px; letter-spacing: -0.3px; }
-    #narrative { font-size: 12px; color: #2c4a6e; line-height: 1.3; }
-    .device-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
-    .metric-row { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; font-size: 11px; }
+    :root {
+      /* Accent palette — kept under the same names main.js references. */
+      --blue: #4a9fe0;
+      --green: #3fbf7f;
+      --amber: #e0a93a;
+      --red: #e0664a;
+      --dom-shading: #4bb6cf;
+      --dom-hvac: #ef9350;
+      --dom-lighting: #e6c247;
+      --dom-none: #93a3b3;
 
-    /* Metric card styling for the HUD */
-    .metric-card {
-      background: rgba(255, 255, 255, 0.6);
-      border-radius: 6px;
-      padding: 4px 6px;
-      border: 1px solid rgba(0, 0, 0, 0.08);
+      /* Dark glass surfaces. */
+      --glass: rgba(16, 28, 44, 0.78);
+      --glass-2: rgba(22, 38, 58, 0.66);
+      --glass-line: rgba(255, 255, 255, 0.10);
+      --glass-line-2: rgba(255, 255, 255, 0.06);
+      --on: #eef4fa;
+      --on-mu: rgba(238, 244, 250, 0.60);
+      --on-faint: rgba(238, 244, 250, 0.40);
+      --shadow: 0 10px 34px rgba(6, 14, 26, 0.34);
     }
-    .metric-label {
-      font-size: 10px;
-      color: #666;
-      margin-bottom: 1px;
+
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      overflow: hidden;
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #dfeaf3;
+      color: var(--on);
+      -webkit-font-smoothing: antialiased;
     }
-    .metric-value {
+    canvas { display: block; }
+
+    .glass {
+      background: var(--glass);
+      border: 1px solid var(--glass-line);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+    }
+
+    /* ===================== TOP BAR ===================== */
+    #hud {
+      position: fixed;
+      top: 12px; left: 12px; right: 12px;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      gap: 10px 18px;
+      flex-wrap: wrap;
+      padding: 8px 14px;
+      border-radius: 14px;
       font-size: 13px;
-      font-weight: 800;
-      color: #0e2238;
     }
-    .controls-col { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
-    .controls-col > div { display: flex; gap: 4px; flex-wrap: wrap; }
+
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .app-title {
+      font-size: 15px; font-weight: 800; letter-spacing: -0.01em;
+      white-space: nowrap; color: var(--on);
+    }
+    #mode-badge {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--blue);
+      color: #04121f;
+      font-weight: 800; font-size: 9.5px;
+      letter-spacing: 0.04em; white-space: nowrap;
+      transition: background 0.25s;
+    }
+
+    .divider { width: 1px; align-self: stretch; background: var(--glass-line); margin: 2px 0; }
+
+    .status-cluster { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; min-width: 0; }
+
+    .occ-pill { display: flex; align-items: center; gap: 7px; }
+    .occ-pill .k {
+      font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--on-faint);
+    }
+    #occ-state {
+      font-weight: 800; font-size: 12px;
+      padding: 3px 11px; border-radius: 999px;
+      background: rgba(63, 191, 127, 0.18);
+      color: var(--green);
+      white-space: nowrap;
+      transition: color 0.25s, background 0.25s;
+    }
+    #occ-state.is-annoyed  { background: rgba(224, 169, 58, 0.18);  color: var(--amber); }
+    #occ-state.is-override { background: rgba(224, 102, 74, 0.20);  color: var(--red); }
+
+    .issue-pill { display: flex; align-items: center; gap: 7px; }
+    .issue-pill .k {
+      font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em;
+      color: var(--on-faint);
+    }
+    #occ-issue {
+      font-weight: 700; font-size: 11.5px; color: var(--on);
+      padding: 3px 10px; border-radius: 999px;
+      background: var(--glass-2); border: 1px solid var(--glass-line-2);
+      white-space: nowrap;
+    }
+
+    .mini-gauge { width: 116px; }
+    .mg-head {
+      display: flex; justify-content: space-between; align-items: baseline;
+      font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.04em;
+      color: var(--on-faint); margin-bottom: 4px;
+    }
+    .mg-head b { font-size: 12px; font-weight: 800; color: var(--on); letter-spacing: 0; text-transform: none; }
+    .bar {
+      position: relative; height: 6px; border-radius: 999px;
+      background: rgba(255, 255, 255, 0.10); overflow: hidden;
+    }
+    #alignment-track { background: linear-gradient(90deg, var(--red) 0%, var(--amber) 50%, var(--green) 100%); overflow: visible; }
+    .bar-fill { position: absolute; top: 0; left: 0; bottom: 0; width: 0%; border-radius: 999px; }
+    #alignment-marker {
+      position: absolute; top: -2px; bottom: -2px; width: 3px; left: 50%;
+      background: #fff; border-radius: 2px; transform: translateX(-50%);
+      box-shadow: 0 0 0 1px rgba(0,0,0,0.25);
+    }
+    #risk-fill { background: var(--green); transition: width 0.3s, background 0.3s; }
+
+    .scn-pill {
+      font-size: 11px; color: var(--on-mu); white-space: nowrap;
+      padding: 3px 10px; border-radius: 999px;
+      background: var(--glass-2); border: 1px solid var(--glass-line-2);
+    }
+    .scn-pill strong { color: var(--on); font-weight: 800; }
+    .scn-ov { color: var(--on-faint); }
+
+    .right-cluster { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+
+    .act-pills { display: flex; gap: 6px; }
+    .apill {
+      display: flex; flex-direction: column; align-items: flex-start;
+      padding: 3px 10px; border-radius: 9px;
+      background: rgba(74, 159, 224, 0.10);
+      border: 1px solid rgba(74, 159, 224, 0.22);
+      line-height: 1.1;
+    }
+    .apill span { font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--on-faint); }
+    .apill b { font-size: 12px; font-weight: 800; color: var(--on); }
+
+    /* Dropdowns (native <details>, no JS needed) */
+    details.dd { position: relative; }
+    details.dd > summary {
+      list-style: none; cursor: pointer; user-select: none;
+      padding: 6px 11px; border-radius: 999px;
+      background: var(--glass-2); border: 1px solid var(--glass-line);
+      font-size: 11px; font-weight: 700; color: var(--on-mu);
+      white-space: nowrap;
+    }
+    details.dd > summary::-webkit-details-marker { display: none; }
+    details.dd[open] > summary { color: var(--on); border-color: rgba(255,255,255,0.22); }
+    .pop {
+      position: absolute; top: calc(100% + 8px); right: 0;
+      border-radius: 12px; padding: 10px;
+      background: var(--glass); border: 1px solid var(--glass-line);
+      box-shadow: var(--shadow); backdrop-filter: blur(14px);
+      z-index: 20;
+    }
+
+    .metrics-pop { display: grid; grid-template-columns: repeat(3, minmax(78px, 1fr)); gap: 6px; }
+    .chip {
+      background: var(--glass-2); border: 1px solid var(--glass-line-2);
+      border-radius: 8px; padding: 5px 9px;
+    }
+    .chip-label { font-size: 9px; color: var(--on-faint); text-transform: uppercase; letter-spacing: 0.03em; }
+    .chip-value { font-size: 13.5px; font-weight: 800; line-height: 1.15; margin-top: 1px; color: var(--on); }
+    .chip-value.warn  { color: var(--amber); }
+    .chip-value.alert { color: var(--red); }
+
+    .info-pop { width: 232px; }
+    .objective { margin: 0; padding: 0; list-style: none; font-size: 11px; color: var(--on-mu); line-height: 1.5; }
+    .objective li { padding-left: 15px; position: relative; }
+    .objective li + li { margin-top: 4px; }
+    .objective li::before {
+      content: ""; position: absolute; left: 2px; top: 7px;
+      width: 5px; height: 5px; border-radius: 50%; background: var(--blue);
+    }
+
+    /* ===================== SITUATION CARD ===================== */
+    #scenario-card {
+      position: fixed; left: 12px; bottom: 16px; z-index: 12;
+      width: 280px; max-width: 30vw;
+      padding: 12px 14px; border-radius: 14px; font-size: 12px;
+    }
+    .card-title {
+      font-size: 9.5px; font-weight: 800; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--on-faint); margin-bottom: 7px;
+    }
+    #diag-issue { font-size: 13px; font-weight: 700; line-height: 1.32; color: var(--on); margin-bottom: 10px; }
+    .diag-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag {
+      display: inline-flex; align-items: baseline; gap: 5px;
+      padding: 4px 10px; border-radius: 999px;
+      background: var(--glass-2); border: 1px solid var(--glass-line-2);
+      font-size: 11px; color: var(--on);
+    }
+    .tag .tk { font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--on-faint); }
+    .tag.risk { background: rgba(63, 191, 127, 0.14); border-color: rgba(63,191,127,0.28); }
+
+    /* ===================== ACTION PANEL ===================== */
+    #action-panel {
+      position: fixed; left: 50%; transform: translateX(-50%); bottom: 16px;
+      z-index: 12; width: min(640px, 56vw);
+      padding: 11px 13px 10px; border-radius: 16px;
+    }
+    .panel-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 9px; }
+    .panel-hint { font-size: 10px; color: var(--on-faint); }
+    #actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .action-card {
+      position: relative; text-align: left;
+      border: 1px solid var(--glass-line); border-radius: 12px;
+      background: var(--glass-2); padding: 8px 12px;
+      cursor: pointer; font: inherit; color: var(--on);
+      flex: 1 1 0; min-width: 116px;
+      display: flex; flex-direction: column; gap: 2px;
+      transition: border-color 0.14s, background 0.14s, transform 0.06s;
+    }
+    .action-card:hover { border-color: var(--blue); background: rgba(74, 159, 224, 0.14); }
+    .action-card:active { transform: translateY(1px); }
+    .action-card:disabled { opacity: 0.4; cursor: default; transform: none; }
+    .ac-head { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .ac-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+    .ac-name {
+      font-weight: 800; font-size: 13px; line-height: 1.2;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    /* Domain on its own line below the title — never collides with the label. */
+    .ac-domain {
+      font-size: 8.5px; text-transform: uppercase;
+      letter-spacing: 0.05em; color: var(--on-faint);
+      padding-left: 15px; line-height: 1.1;
+    }
+    .ac-domain:empty { display: none; }
+    /* Consequences stay quiet until the player considers a pill (hover/focus). */
+    .ac-effects {
+      display: flex; flex-wrap: wrap; gap: 2px 10px;
+      font-size: 10px; color: var(--on-mu);
+      max-height: 0; opacity: 0; overflow: hidden;
+      transition: max-height 0.16s ease, opacity 0.16s ease;
+    }
+    .action-card:hover .ac-effects,
+    .action-card:focus-visible .ac-effects { max-height: 40px; opacity: 1; margin-top: 2px; }
+    .ac-effects b { font-weight: 700; color: var(--on); }
+
+    #status { margin-top: 9px; color: var(--blue); font-weight: 700; font-size: 10.5px; }
+
+    /* ===================== FEEDBACK TOAST ===================== */
+    #feedback-panel {
+      position: fixed; right: 12px; bottom: 16px; z-index: 12;
+      width: 264px; max-width: 28vw;
+      padding: 11px 14px; border-radius: 14px;
+      border-left: 3px solid var(--glass-line);
+      font-size: 12px;
+    }
+    #feedback-panel.aligned    { border-left-color: var(--green); }
+    #feedback-panel.partial    { border-left-color: var(--amber); }
+    #feedback-panel.misaligned { border-left-color: var(--red); }
+    #fb-verdict { font-size: 13px; font-weight: 800; margin-bottom: 4px; color: var(--on); }
+    .aligned #fb-verdict    { color: var(--green); }
+    .partial #fb-verdict    { color: var(--amber); }
+    .misaligned #fb-verdict { color: var(--red); }
+    #fb-reason { color: var(--on-mu); line-height: 1.4; margin-bottom: 9px; }
+    .fb-metrics { display: flex; flex-wrap: wrap; gap: 5px; }
+    .fb-metrics .tag { font-size: 10.5px; }
+
+    /* ===================== END SUMMARY ===================== */
+    #summary-overlay {
+      position: fixed; inset: 0; z-index: 40; display: none;
+      align-items: center; justify-content: center;
+      background: rgba(8, 16, 28, 0.6); backdrop-filter: blur(4px);
+    }
+    #summary-overlay.show { display: flex; }
+    .summary-card {
+      width: 420px; max-width: 90vw; border-radius: 18px; padding: 24px 26px;
+      background: var(--glass); border: 1px solid var(--glass-line);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45); backdrop-filter: blur(16px);
+    }
+    .summary-card h2 { margin: 0 0 2px; font-size: 20px; color: var(--on); }
+    .summary-card .sub { font-size: 11px; color: var(--on-mu); margin-bottom: 18px; }
+    .sum-score { font-size: 46px; font-weight: 800; line-height: 1; letter-spacing: -0.02em; color: var(--on); }
+    .sum-score small { font-size: 16px; color: var(--on-faint); font-weight: 700; }
+    #sum-style {
+      display: inline-block; margin: 12px 0 14px; padding: 5px 12px; border-radius: 999px;
+      background: rgba(74, 159, 224, 0.16); color: var(--blue); font-weight: 800; font-size: 13px;
+    }
+    #sum-detail { font-size: 12.5px; color: var(--on-mu); line-height: 1.55; margin-bottom: 20px; }
+    #sum-detail b { color: var(--on); }
+    #sum-restart {
+      width: 100%; border: none; border-radius: 10px;
+      background: var(--blue); color: #04121f; font-weight: 800; font-size: 13px;
+      padding: 11px; cursor: pointer;
+    }
+    #sum-restart:hover { filter: brightness(1.08); }
+
+    #credit-footer {
+      position: fixed; bottom: 3px; left: 0; width: 100%; text-align: center;
+      z-index: 8; font-size: 10px; color: rgba(15, 36, 56, 0.55); pointer-events: none;
+    }
+    #credit-footer a { color: rgba(26, 95, 158, 0.85); font-weight: 700; text-decoration: none; pointer-events: auto; }
+    #credit-footer a:hover { text-decoration: underline; }
+
+    @media (max-width: 1180px) {
+      .mini-gauge { width: 92px; }
+    }
+    @media (max-width: 980px) {
+      #scenario-card, #feedback-panel { display: none; }
+      #action-panel { width: min(640px, 92vw); }
+      .act-pills { display: none; }
+    }
   </style>
 </head>
+
 <body>
-  <!-- Heads up display -->
-  <div id="hud">
-    <div class="hud-section">
-      <div class="hud-title">🎮 Comfort Quest</div>
-      <div id="narrative">🕹️ Control the blinds, thermostat, and lights — keep the occupant happy. Can you crack their comfort code?</div>
-      <div id="mode-badge" style="display:inline-block;padding:3px 8px;border-radius:20px;font-size:11px;font-weight:700;background:#1a6bb5;color:white;align-self:flex-start;">
-        🎮 YOU ARE THE AUTOMATION
-      </div>
-      <div style="margin-top:4px;">
-        <div style="display:flex;justify-content:space-between;font-size:10px;color:#666;margin-bottom:2px;">
-          <span>😊 Aligned</span>
-          <span>😤 Misaligned</span>
-        </div>
-        <div style="background:#e1e7ee;height:8px;border-radius:4px;overflow:hidden;">
-          <div id="annoyance-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#5cb85c,#f0ad4e,#d9534f);transition:width 0.3s;"></div>
-        </div>
-      </div>
+  <!-- ===================== TOP BAR ===================== -->
+  <div id="hud" class="glass">
+    <div class="brand">
+      <span class="app-title">The Alignment Office</span>
+      <span id="mode-badge">YOU ARE THE AUTOMATION</span>
     </div>
 
-    <div class="hud-section">
-      <div class="device-row">
-        <div class="metric-card"><div class="metric-label">🪟 Shade</div><div class="metric-value" id="val-shade">Up</div></div>
-        <div class="metric-card"><div class="metric-label">🌡 Thermostat</div><div class="metric-value" id="val-therm">22°C</div></div>
-        <div class="metric-card"><div class="metric-label">💡 Lights</div><div class="metric-value" id="val-lights">ON</div></div>
-        <div class="metric-card"><div class="metric-label">❄️ AC</div><div class="metric-value" id="val-ac">OFF</div></div>
+    <div class="divider"></div>
+
+    <div class="status-cluster">
+      <div class="occ-pill"><span class="k">Occupant</span><span id="occ-state">Comfortable</span></div>
+      <div class="issue-pill"><span class="k">Issue</span><span id="occ-issue" hidden>none</span></div>
+      <div class="mini-gauge">
+        <div class="mg-head"><span>Alignment</span><b id="align-score">100</b></div>
+        <div class="bar" id="alignment-track"><div id="alignment-marker"></div></div>
       </div>
-      <div class="metric-row" style="margin-top:4px;">
-        <div><span style="color:#888">PMV</span><br><strong id="val-pmv">0.0</strong></div>
-        <div><span style="color:#888">Temp</span><br><strong id="val-temp">22°C</strong></div>
-        <div><span style="color:#888">CO₂</span><br><strong id="val-co2">400ppm</strong></div>
-        <div><span style="color:#888">Lux</span><br><strong id="val-lux">300</strong></div>
-        <div><span style="color:#888">Humidity</span><br><strong id="val-hum">45%</strong></div>
-        <div><span style="color:#888">Time</span><br><strong id="val-time">08:00</strong></div>
+      <div class="mini-gauge">
+        <div class="mg-head"><span>Override risk</span><b id="risk-val">Low</b></div>
+        <div class="bar"><div class="bar-fill" id="risk-fill"></div></div>
       </div>
+      <div class="scn-pill">Scenario <strong id="scn-now">1</strong>/<span id="scn-total">10</span>
+        <span class="scn-ov">· <strong id="scn-overrides">0</strong> overrides</span></div>
     </div>
 
-    <div class="controls-col">
-      <div>
-        <button id="shadeBtn">Lower shade</button>
-        <button id="thermBtn">Change thermostat</button>
-        <button id="lightBtn">Dim lights</button>
+    <div class="right-cluster">
+      <div class="act-pills">
+        <div class="apill"><span>Shade</span><b id="val-shade">Up</b></div>
+        <div class="apill"><span>Therm</span><b id="val-therm">22°C</b></div>
+        <div class="apill"><span>Lights</span><b id="val-lights">On</b></div>
       </div>
-      <div id="status" style="font-weight:700;color:#005a92;font-size:11px;">Status: waiting for interaction</div>
+      <details class="dd metrics-dd">
+        <summary>Metrics</summary>
+        <div class="pop metrics-pop">
+          <div class="chip"><div class="chip-label">Temp</div><div class="chip-value" id="val-temp">22.0°C</div></div>
+          <div class="chip"><div class="chip-label">PMV</div><div class="chip-value" id="val-pmv">0.00</div></div>
+          <div class="chip"><div class="chip-label">CO₂</div><div class="chip-value" id="val-co2">450ppm</div></div>
+          <div class="chip"><div class="chip-label">Lux</div><div class="chip-value" id="val-lux">400</div></div>
+          <div class="chip"><div class="chip-label">Humidity</div><div class="chip-value" id="val-hum">45%</div></div>
+          <div class="chip"><div class="chip-label">Time</div><div class="chip-value" id="val-time">08:00</div></div>
+        </div>
+      </details>
+      <details class="dd info-dd">
+        <summary>?</summary>
+        <div class="pop info-pop">
+          <ul class="objective">
+            <li>Choose actions the occupant will accept.</li>
+            <li>An override means you misread their preference.</li>
+            <li>Balance comfort against energy use.</li>
+          </ul>
+        </div>
+      </details>
+    </div>
+
+    <!-- kept for compatibility; AC state is reflected in the thermostat pill -->
+    <span id="val-ac" hidden>OFF</span>
+  </div>
+
+  <!-- ===================== SITUATION CARD ===================== -->
+  <div id="scenario-card" class="glass">
+    <div class="card-title">Current situation</div>
+    <div id="diag-issue">Reading the room…</div>
+    <div class="diag-tags">
+      <span class="tag"><span class="tk">Priority</span><strong id="diag-priority">—</strong></span>
+      <span class="tag"><span class="tk">Tension</span><strong id="diag-conflict">—</strong></span>
+      <span class="tag risk"><span class="tk">Risk</span><strong id="diag-risk">Low</strong></span>
     </div>
   </div>
-  <!-- Resolve bare module specifiers (used inside Three.js add-ons) so the
-       site can be served as plain static files (GitHub Pages, etc.). -->
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
-    }
-  }
-  </script>
-  <!-- Import the simulation module -->
-  <script type="importmap">
-  {
-    "imports": {
-      "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
-    }
-  }
-  </script>
 
+  <!-- ===================== ACTION PANEL ===================== -->
+  <div id="action-panel" class="glass">
+    <div class="panel-head">
+      <span class="card-title" style="margin:0;">Choose automation action</span>
+      <span class="panel-hint">hover a service to preview its effect</span>
+    </div>
+    <div id="actions"><!-- action pills rendered by main.js --></div>
+    <div id="status">Status: waiting for interaction</div>
+  </div>
+
+  <!-- ===================== FEEDBACK TOAST ===================== -->
+  <!-- Hidden until the player's first action this session. -->
+  <div id="feedback-panel" class="glass" hidden>
+    <div class="card-title">Last decision</div>
+    <div id="fb-verdict"></div>
+    <div id="fb-reason"></div>
+    <div class="fb-metrics">
+      <span class="tag"><span class="tk">Alignment</span><b id="fb-delta">—</b></span>
+      <span class="tag"><span class="tk">Override risk</span><b id="fb-risk">—</b></span>
+    </div>
+  </div>
+
+  <!-- ===================== END SUMMARY ===================== -->
+  <div id="summary-overlay">
+    <div class="summary-card">
+      <h2>Session debrief</h2>
+      <div class="sub">The Alignment Office</div>
+      <div class="sum-score"><span id="sum-score">0</span><small>/100 alignment</small></div>
+      <div id="sum-style">—</div>
+      <div id="sum-detail"></div>
+      <button id="sum-restart">Run a new session</button>
+    </div>
+  </div>
+
+  <footer id="credit-footer">
+    Developed by
+    <a href="https://pablomartinezalcaraz.com/" target="_blank" rel="noopener noreferrer">Rato Penato</a>
+  </footer>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+    }
+  }
+  </script>
   <script type="module" src="./src/main.js"></script>
 </body>
 </html>
